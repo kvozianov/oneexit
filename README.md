@@ -25,6 +25,10 @@ oneexit leak-test
 > anonymous, it does not hide you from your VPS provider, and it has not had an
 > independent security review. Read the [threat model](docs/threat-model.md) before
 > you rely on it.
+>
+> **Status.** [v0.1.0](https://github.com/kvozianov/oneexit/releases/tag/v0.1.0) is a
+> pre-release: the server side is exercised by a real install in CI, the macOS client by
+> dry runs and tests, not yet on a production Mac booted from an external SSD.
 
 ## Who this is for
 
