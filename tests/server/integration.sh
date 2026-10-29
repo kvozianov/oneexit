@@ -96,7 +96,32 @@ check "net.ipv4.ip_forward = 1" test "$(sysctl -n net.ipv4.ip_forward)" = "1"
 ruleset="$(nft list ruleset)"
 check "nft ruleset contains masquerade" grep -q 'masquerade' <<<"${ruleset}"
 check "nft ruleset contains udp dport ${PORT}" grep -q "udp dport ${PORT}" <<<"${ruleset}"
-check "nftables.conf includes the oneexit ruleset" grep -qF 'include "/etc/nftables.d/oneexit.nft"' /etc/nftables.conf
+check "oneexit-nft.service is active" systemctl is-active --quiet oneexit-nft.service
+check "oneexit-nft.service is enabled" systemctl is-enabled --quiet oneexit-nft.service
+no_nftables_conf_include() {
+  [[ ! -e /etc/nftables.conf ]] || ! grep -qF 'oneexit' /etc/nftables.conf
+}
+check "/etc/nftables.conf is not modified" no_nftables_conf_include
+
+oneexit_tables_loaded() {
+  nft list table inet oneexit >/dev/null 2>&1 && nft list table ip oneexit_nat >/dev/null 2>&1
+}
+oneexit_tables_absent() {
+  ! nft list table inet oneexit >/dev/null 2>&1 && ! nft list table ip oneexit_nat >/dev/null 2>&1
+}
+check "oneexit tables are loaded" oneexit_tables_loaded
+systemctl stop oneexit-nft.service || fail "systemctl stop oneexit-nft.service failed"
+check "stopping oneexit-nft removes only the oneexit tables" oneexit_tables_absent
+systemctl start oneexit-nft.service || fail "systemctl start oneexit-nft.service failed"
+check "starting oneexit-nft loads the tables again" oneexit_tables_loaded
+systemctl restart oneexit-nft.service || fail "systemctl restart oneexit-nft.service failed"
+check "after systemctl restart oneexit-nft the tables are back" oneexit_tables_loaded
+ruleset_complete() {
+  local rules
+  rules="$(nft list ruleset)"
+  grep -q 'masquerade' <<<"${rules}" && grep -q "udp dport ${PORT}" <<<"${rules}"
+}
+check "restarted ruleset contains masquerade and udp dport ${PORT}" ruleset_complete
 
 # Local addresses of listening UDP sockets. Callers read the whole output
 # (no `grep -q`), so an early exit cannot break the pipe under pipefail.
@@ -123,7 +148,7 @@ no_wildcard_dns() {
 }
 check "nothing listens on 0.0.0.0:53" no_wildcard_dns
 
-for unit in wg-quick@wg0 unbound nftables; do
+for unit in wg-quick@wg0 unbound; do
   check "${unit} is enabled" systemctl is-enabled --quiet "${unit}"
 done
 
@@ -168,6 +193,7 @@ fi
 check "re-running install.sh keeps the server key" test "$(sha256sum /etc/wireguard/server.key)" = "${key_before}"
 check "re-running install.sh keeps the first peer" test "$(sha256sum /etc/wireguard/peers/ci.conf)" = "${peer_before}"
 check "re-running install.sh adds no peers" test "$(wg show wg0 peers | wc -l)" -eq 1
-check "include line appears once in nftables.conf" test "$(grep -cF 'include "/etc/nftables.d/oneexit.nft"' /etc/nftables.conf)" -eq 1
+check "re-running install.sh leaves /etc/nftables.conf alone" no_nftables_conf_include
+check "oneexit-nft.service is still active" systemctl is-active --quiet oneexit-nft.service
 
 printf '\nAll server integration checks passed.\n'

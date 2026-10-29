@@ -133,6 +133,10 @@ pf_conf_has_hook() {
   return 1
 }
 
+# pf_repair_main_ruleset: reload the stock /etc/pf.conf (never edited) so the
+# "com.apple/*" hook is back; the caller reloads our anchor afterwards.
+pf_repair_main_ruleset() { run pfctl -f "${ONEEXIT_PF_CONF}"; }
+
 # shellcheck disable=SC2034 # used by the scripts that source this file
 PF_HOOK_MISSING_MSG='main pf ruleset has no "com.apple/*" anchor; the kill switch is not active'
 
@@ -182,13 +186,13 @@ pf_rules_file() {
 }
 
 # pf_render_mode MODE: render the ruleset for MODE from the loaded config
-# (VPS_IP, VPS_PORT, PHYS_IFACES) and the live tunnel interface (TUN_IFACE if
+# (VPS_IP, VPS_PORT, PHYS_IFACES or the live en* ports for "auto") and the live tunnel interface (TUN_IFACE if
 # set, else tunnel_iface_or_placeholder). Falls back to the failsafe ruleset.
 pf_render_mode() {
   local mode="$1" tun="${TUN_IFACE:-}"
   [ -n "${tun}" ] || tun="$(tunnel_iface_or_placeholder)"
-  # shellcheck disable=SC2086 # PHYS_IFACES is a space-separated list
-  set -- ${PHYS_IFACES:-}
+  # shellcheck disable=SC2046 # the interface list is space-separated
+  set -- $(effective_phys_ifaces)
   case "${mode}" in
     unlocked) render_pf_unlocked ;;
     failsafe) render_pf_failsafe ;;

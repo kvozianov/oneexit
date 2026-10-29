@@ -51,17 +51,23 @@ SYSCTL_FILE="$(root_path /etc/sysctl.d/99-oneexit.conf)"
 UNBOUND_DIR="$(root_path /etc/unbound)"
 UNBOUND_FILE="${UNBOUND_DIR}/unbound.conf.d/oneexit.conf"
 
-# nftables persistence: Debian and Ubuntu load /etc/nftables.conf from
-# nftables.service at boot, and that file does not read /etc/nftables.d by
-# default. Our ruleset lives in its own file (/etc/nftables.d/oneexit.nft,
-# only our tables, idempotent) and a single include line is appended to
-# /etc/nftables.conf. The live ruleset is loaded with `nft -f` on that file;
-# nftables.service is enabled but not (re)started here, because the stock
-# /etc/nftables.conf starts with `flush ruleset`, which would wipe rules
-# installed by other tools (ufw, docker) on a running system.
-NFT_INCLUDE_PATH="/etc/nftables.d/oneexit.nft"
-NFT_FILE="$(root_path "${NFT_INCLUDE_PATH}")"
+# nftables persistence: our ruleset lives in its own file
+# (/etc/nftables.d/oneexit.nft: only the tables inet oneexit and
+# ip oneexit_nat, safe to load repeatedly) and is loaded by our own oneshot
+# unit, oneexit-nft.service, at boot and by this installer. /etc/nftables.conf
+# and nftables.service are left alone on purpose: the stock
+# /etc/nftables.conf starts with `flush ruleset`, which would wipe rules of
+# other tools (ufw, docker) at every boot or restart of nftables.service.
+# Stopping oneexit-nft.service deletes our two tables and nothing else.
+NFT_RULES_PATH="/etc/nftables.d/oneexit.nft"
+NFT_FILE="$(root_path "${NFT_RULES_PATH}")"
+NFT_UNIT="oneexit-nft.service"
+NFT_UNIT_FILE="$(root_path "/etc/systemd/system/${NFT_UNIT}")"
+# Earlier versions appended these two lines to /etc/nftables.conf; they are
+# removed if present.
 NFT_MAIN="$(root_path /etc/nftables.conf)"
+NFT_OLD_INCLUDE="include \"${NFT_RULES_PATH}\""
+NFT_OLD_COMMENT="# oneexit (server/install.sh): WireGuard firewall and NAT"
 
 parse_args() {
   while (($# > 0)); do
@@ -120,8 +126,13 @@ check_system() {
 
 install_packages() {
   step "Installing packages"
-  run env DEBIAN_FRONTEND=noninteractive apt-get update -q
-  run env DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
+  # On a fresh VPS unattended-upgrades often holds the dpkg lock for a few
+  # minutes: wait for it instead of failing. NEEDRESTART_MODE=a keeps Ubuntu's
+  # needrestart from prompting.
+  run env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+    apt-get -o DPkg::Lock::Timeout=600 update -q
+  run env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+    apt-get -o DPkg::Lock::Timeout=600 install -y -q \
     wireguard wireguard-tools unbound nftables qrencode
   if ! is_dry_run; then
     require_cmd wg wg-quick nft unbound-checkconf qrencode systemctl sysctl ip
@@ -213,22 +224,20 @@ setup_sysctl() {
   run sysctl -p "${SYSCTL_FILE}"
 }
 
-ensure_nft_include() {
-  local line="include \"${NFT_INCLUDE_PATH}\""
-  if [[ -r "${NFT_MAIN}" ]] && grep -qF "${line}" "${NFT_MAIN}"; then
-    ok "${NFT_MAIN} already includes ${NFT_INCLUDE_PATH}"
-  elif [[ -r "${NFT_MAIN}" ]]; then
-    {
-      cat "${NFT_MAIN}"
-      printf '\n# oneexit (server/install.sh): WireGuard firewall and NAT\n%s\n' "${line}"
-    } | write_file "${NFT_MAIN}" 0755
-  elif [[ -e "${NFT_MAIN}" ]]; then
+# Remove the include line an earlier version added to /etc/nftables.conf
+# (idempotent: nothing happens when it is absent).
+remove_old_nft_include() {
+  local content
+  [[ -e "${NFT_MAIN}" ]] || return 0
+  if [[ ! -r "${NFT_MAIN}" ]]; then
     is_dry_run || die "cannot read ${NFT_MAIN}"
-    warn "dry-run: cannot read ${NFT_MAIN}; the line '${line}' would be appended"
-  else
-    printf '#!/usr/sbin/nft -f\n\n# oneexit (server/install.sh): WireGuard firewall and NAT\n%s\n' "${line}" |
-      write_file "${NFT_MAIN}" 0755
+    warn "dry-run: cannot read ${NFT_MAIN}; an old oneexit include line in it would be removed"
+    return 0
   fi
+  grep -qxF "${NFT_OLD_INCLUDE}" "${NFT_MAIN}" || return 0
+  content="$(awk -v inc="${NFT_OLD_INCLUDE}" -v cmt="${NFT_OLD_COMMENT}" '$0 != inc && $0 != cmt' "${NFT_MAIN}")"
+  printf '%s\n' "${content}" | write_file "${NFT_MAIN}" 0755
+  ok "removed the old oneexit include line from ${NFT_MAIN}"
 }
 
 # With ufw active, its own base chains drop what ours accept (a packet must be
@@ -248,10 +257,19 @@ configure_ufw() {
 setup_nftables() {
   step "nftables (NAT ${WG_SUBNET} -> ${IFACE}, allow udp/${PORT})"
   run install -d -m 0755 "$(dirname "${NFT_FILE}")"
+  local was_active=0
   render_nftables_conf "${PORT}" "${IFACE}" | write_file "${NFT_FILE}" 0644
-  ensure_nft_include
-  run nft -f "${NFT_FILE}"
-  run systemctl enable nftables
+  render_nft_unit | write_file "${NFT_UNIT_FILE}" 0644
+  remove_old_nft_include
+  if ! is_dry_run && systemctl is-active --quiet "${NFT_UNIT}"; then
+    was_active=1
+  fi
+  run systemctl daemon-reload
+  run systemctl enable --now "${NFT_UNIT}"
+  if ((was_active)); then
+    # Already running: reload the (possibly changed) ruleset atomically.
+    run nft -f "${NFT_FILE}"
+  fi
   configure_ufw
 }
 
@@ -292,7 +310,7 @@ start_services() {
   run systemctl enable --now wg-quick@wg0
   run systemctl enable unbound
   run systemctl restart unbound
-  ok "wg-quick@wg0, unbound and nftables enabled"
+  ok "wg-quick@wg0, unbound and ${NFT_UNIT} enabled"
 }
 
 first_peer() {

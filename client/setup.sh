@@ -25,7 +25,8 @@ Usage: sudo client/setup.sh --config PEER.conf [options]
 
 Sets up the oneexit kill switch on this Mac:
   * installs wireguard-tools and wireguard-go with Homebrew
-  * stores the WireGuard client config as ${ONEEXIT_WG_CONF}
+  * stores the WireGuard client config as ${ONEEXIT_WG_CONF} (without its DNS
+    line, Endpoint pinned to the server's IP)
   * writes the pf anchor ${ONEEXIT_ANCHOR_FILE} (only the tunnel may talk)
   * turns IPv6 off and points DNS at the tunnel resolver on every network service
   * installs and starts the launchd daemons ${ONEEXIT_FIREWALL_LABEL} and ${ONEEXIT_TUNNEL_LABEL}
@@ -33,7 +34,8 @@ Sets up the oneexit kill switch on this Mac:
 Options:
   --config PATH           client config printed by server/peer.sh (required)
   --iface IFACE           physical interface allowed to reach the VPS; repeat for
-                          several (default: every en* hardware port)
+                          several (default: auto, every en* hardware port,
+                          re-read by the firewall daemon on every pass)
   --allow-internal-disk   install even though macOS runs from the internal disk
   --dry-run               print every command and file instead of changing anything
   --help                  show this help
@@ -217,13 +219,27 @@ case "${ENDPOINT_HOST}" in
   *:*) die "IPv6 endpoints are not supported (IPv6 is blocked entirely); use the server's IPv4 address" ;;
 esac
 
+# A previous setup (re-run after "uninstall --keep-keys" on the installed
+# wg0.conf, which has no DNS line and a pinned Endpoint) keeps its values.
+PREV_DNS=""
+PREV_HOST=""
+PREV_IP=""
+if load_config; then
+  PREV_DNS="${TUNNEL_DNS}"
+  PREV_HOST="${VPS_HOST}"
+  PREV_IP="${VPS_IP}"
+fi
+
 TUNNEL_DNS=""
 for entry in $(printf '%s' "${WG_DNS}" | tr ',' ' '); do
   if is_ipv4 "${entry}"; then
     TUNNEL_DNS="${TUNNEL_DNS}${TUNNEL_DNS:+,}${entry}"
   fi
 done
-if [ -z "${TUNNEL_DNS}" ]; then
+if [ -z "${TUNNEL_DNS}" ] && [ -n "${PREV_DNS}" ]; then
+  log_ok "no DNS in ${PEER_CONF}; keeping ${PREV_DNS} from the previous setup"
+  TUNNEL_DNS="${PREV_DNS}"
+elif [ -z "${TUNNEL_DNS}" ]; then
   log_warn "no DNS in ${PEER_CONF}; using ${ONEEXIT_DEFAULT_DNS}"
   TUNNEL_DNS="${ONEEXIT_DEFAULT_DNS}"
 fi
@@ -237,11 +253,20 @@ else
   log_ok "Endpoint ${VPS_IP}:${VPS_PORT}"
 fi
 
-if [ -z "${IFACES}" ]; then
-  IFACES="$(phys_ifaces)"
+VPS_HOST="${ENDPOINT_HOST}"
+if [ "${VPS_IP}" = "${ENDPOINT_HOST}" ] && [ "${VPS_IP}" = "${PREV_IP}" ] && [ -n "${PREV_HOST}" ]; then
+  VPS_HOST="${PREV_HOST}"
 fi
-PHYS_IFACES="${IFACES}"
-log_ok "physical interfaces: ${PHYS_IFACES}"
+
+# "auto": oneexit-firewalld re-reads the en* hardware ports on every pass,
+# so an adapter plugged in later works. --iface pins the list.
+if [ -z "${IFACES}" ]; then
+  PHYS_IFACES="auto"
+  log_ok "physical interfaces: auto (now: $(effective_phys_ifaces))"
+else
+  PHYS_IFACES="${IFACES}"
+  log_ok "physical interfaces: ${PHYS_IFACES}"
+fi
 
 # ---------------------------------------------------------------- 4. files
 
@@ -253,24 +278,21 @@ write_file "${ONEEXIT_CONFIG}" 0644 <<CONF
 # pf anchor from this file within a few seconds.
 VPS_IP=${VPS_IP}
 VPS_PORT=${VPS_PORT}
-VPS_HOST=${ENDPOINT_HOST}
+VPS_HOST=${VPS_HOST}
 WG_IFACE_CONF=${ONEEXIT_WG_CONF}
 PHYS_IFACES="${PHYS_IFACES}"
 TUNNEL_DNS=${TUNNEL_DNS}
 CONF
 
 log_step "Installing the WireGuard config as ${ONEEXIT_WG_CONF}"
+# wg-quick must not manage DNS (it restores its saved DNS on down and would
+# undo portal/unlock; oneexit sets DNS itself), and the Endpoint is pinned to
+# the IP because a hostname cannot be resolved once DNS points into the tunnel.
 run install -d -m 0700 -o root -g wheel "${ONEEXIT_WG_DIR}"
-if [ -e "${ONEEXIT_WG_CONF}" ] && [ "${PEER_CONF}" -ef "${ONEEXIT_WG_CONF}" ]; then
-  # Re-running setup on the installed config (e.g. after uninstall --keep-keys).
-  run chown root:wheel "${ONEEXIT_WG_CONF}"
-  run chmod 0600 "${ONEEXIT_WG_CONF}"
-else
-  run install -m 0600 -o root -g wheel "${PEER_CONF}" "${ONEEXIT_WG_CONF}"
-fi
-if is_dry_run; then
-  log_info "    (contents not shown: the file holds the private key)"
-fi
+render_installed_wg_conf "${PEER_CONF}" "${VPS_IP}" "${VPS_PORT}" |
+  write_secret_file "${ONEEXIT_WG_CONF}" 0600
+run chown root:wheel "${ONEEXIT_WG_CONF}"
+log_ok "DNS line removed, Endpoint = ${VPS_IP}:${VPS_PORT}"
 
 log_step "Installing the oneexit CLI and daemons"
 run install -d -m 0755 -o root -g wheel "$(dirname "${ONEEXIT_BIN}")" "${ONEEXIT_LIBEXEC}" "${ONEEXIT_LIBEXEC}/lib"
@@ -286,8 +308,8 @@ done
 log_step "Writing the pf anchor ${ONEEXIT_ANCHOR_FILE}"
 # The tunnel is not up yet: the utun99 placeholder matches nothing, so only
 # DHCP and the endpoint pass until oneexit-firewalld sees the real utun.
-# shellcheck disable=SC2086 # PHYS_IFACES is a space-separated list
-render_pf "${VPS_IP}" "${VPS_PORT}" "${ONEEXIT_TUN_PLACEHOLDER}" ${PHYS_IFACES} |
+# shellcheck disable=SC2046 # the interface list is space-separated
+render_pf "${VPS_IP}" "${VPS_PORT}" "${ONEEXIT_TUN_PLACEHOLDER}" $(effective_phys_ifaces) |
   write_file "${ONEEXIT_ANCHOR_FILE}" 0644
 
 log_step "Recording the current pf state"
@@ -335,13 +357,31 @@ for label in "${ONEEXIT_FIREWALL_LABEL}" "${ONEEXIT_TUNNEL_LABEL}"; do
   run chown root:wheel "${plist}"
 done
 
+log_step "Rotating the logs (newsyslog)"
+# The daemons reopen their log on SIGUSR1 (30), sent via their pid files.
+write_file "${ONEEXIT_NEWSYSLOG_CONF}" 0644 <<NEWSYSLOG
+# oneexit logs: rotate at 1 MB, keep 5 (written by oneexit setup.sh)
+# logfilename                      [owner:group] mode count size(KB) when flags pid_file                           sig
+${ONEEXIT_LOG_DIR}/firewall.log    root:wheel    644  5     1024     *    -     ${ONEEXIT_RUN_DIR}/firewalld.pid    30
+${ONEEXIT_LOG_DIR}/tunnel.log      root:wheel    644  5     1024     *    -     ${ONEEXIT_RUN_DIR}/tunneld.pid      30
+NEWSYSLOG
+
 log_step "Starting the daemons"
 for label in "${ONEEXIT_FIREWALL_LABEL}" "${ONEEXIT_TUNNEL_LABEL}"; do
   if command -v launchctl >/dev/null 2>&1 && launchctl print "system/${label}" >/dev/null 2>&1; then
     run launchctl bootout "system/${label}" || true
   fi
   run launchctl enable "system/${label}"
-  run launchctl bootstrap system "${ONEEXIT_LAUNCHD_DIR}/${label}.plist"
+  # Right after a bootout launchd can answer "Bootstrap failed: 5"; retry.
+  attempt=1
+  until run launchctl bootstrap system "${ONEEXIT_LAUNCHD_DIR}/${label}.plist"; do
+    if [ "${attempt}" -ge 5 ]; then
+      die "launchctl bootstrap ${label} failed ${attempt} times; see: sudo launchctl print system/${label}"
+    fi
+    log_warn "launchctl bootstrap ${label} failed; retrying (${attempt}/5)"
+    attempt=$((attempt + 1))
+    sleep 1
+  done
 done
 
 # ---------------------------------------------------------------- 7. next steps

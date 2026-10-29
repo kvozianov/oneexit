@@ -169,6 +169,15 @@ connection. WireGuard's own overhead is small. A server in a nearby region keeps
 difference small for everyday browsing. The first DNS lookup of a name can take longer
 than with a large public resolver, because unbound resolves it from scratch.
 
+## How do I reach my VPS over SSH from the sealed Mac?
+
+Through the tunnel: `ssh root@10.66.0.1` (or your admin user). The server's public
+address is reachable from the Mac only on the WireGuard port, by design: wg-quick routes
+that one address outside the tunnel (it is how the encrypted packets reach the server),
+and pf lets only UDP to the WireGuard port take that path, so `ssh root@<public IP>`
+simply times out. Using the tunnel address keeps SSH inside WireGuard and needs no
+extra rule; make sure sshd on the server listens on all addresses or on `10.66.0.1`.
+
 ## My VPS got a new IP address. What now?
 
 pf rules need an IP address, so `setup.sh` stores the server's IP at setup time, even

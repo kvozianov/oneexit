@@ -1,4 +1,20 @@
 #!/usr/bin/env bash
-# Test stub for wg: no interfaces.
-echo "Unable to access interface: No such file or directory" >&2
-exit 1
+# Test stub for wg, mimicking macOS: wireguard-go's socket is named after the
+# utun device, so "wg show utunN" works and "wg show wg0" does not.
+# "wg show interfaces" lists nothing (callers must find the device themselves).
+[ "${1:-}" = "show" ] || exit 1
+case "${2:-}" in
+  interfaces) exit 0 ;;
+  utun[0-9]*)
+    if [ "${3:-}" = "latest-handshakes" ]; then
+      printf 'FAKEserverPUBLICkeyFAKEserverPUBLICkeyFAKE00=\t%s\n' "$(date +%s)"
+    else
+      printf 'interface: %s\n' "$2"
+    fi
+    exit 0
+    ;;
+  *)
+    echo "Unable to access interface: No such file or directory" >&2
+    exit 1
+    ;;
+esac

@@ -25,16 +25,26 @@ client_test_env() {
   export ONEEXIT_RUN_DIR="${t}/run"
   export ONEEXIT_WG_RUN_DIR="${t}/wireguard"
   export ONEEXIT_PF_CONF="${FIXTURES}/pf.conf"
+  export ONEEXIT_NEWSYSLOG_CONF="${t}/newsyslog.d/oneexit.conf"
   export ONEEXIT_NO_SUDO=1
   mkdir -p "${ONEEXIT_ETC_DIR}" "${ONEEXIT_RUN_DIR}" "${ONEEXIT_WG_RUN_DIR}"
   unset DRY_RUN FAKE_DISK FAKE_NO_PORTS FAKE_PFCTL TUN_IFACE
 }
 
-# write_test_config [VPS_IP]: a config as setup.sh would write it.
+# write_test_config [VPS_IP] [PHYS_IFACES]: a config as setup.sh would write it.
 write_test_config() {
   printf '%s\n' "VPS_IP=${1:-203.0.113.5}" "VPS_PORT=51820" \
-    "WG_IFACE_CONF=${ONEEXIT_WG_CONF}" 'PHYS_IFACES="en0"' "TUNNEL_DNS=10.66.0.1" \
+    "WG_IFACE_CONF=${ONEEXIT_WG_CONF}" "PHYS_IFACES=\"${2:-en0}\"" "TUNNEL_DNS=10.66.0.1" \
     >"${ONEEXIT_CONFIG}"
+}
+
+# dry_run_block OUTPUT PATH: the "    | " content lines that a dry run printed
+# for "[dry-run] write PATH ...".
+dry_run_block() {
+  printf '%s\n' "$1" | awk -v want="[dry-run] write $2 " '
+    index($0, want) == 1 { on = 1; next }
+    on && /^    \| / { print substr($0, 7); next }
+    on { exit }'
 }
 
 # load_client_libs: source the client libraries. common.sh defines run(),

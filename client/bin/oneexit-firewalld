@@ -80,6 +80,7 @@ require_root
 LAST_MODE=""
 LAST_TUN=""
 LAST_HOOK=""
+LAST_REPAIR=0
 RESTORE_DNS=0
 TUN_IFACE=""
 
@@ -139,6 +140,30 @@ check_once() {
     fi
   fi
 
+  # Our anchor only counts if the main ruleset still calls com.apple/*.
+  # If something replaced the main ruleset, load the stock pf.conf again
+  # (never edited) and then our anchor (at most every 30 s).
+  pf_main_has_hook || hook_rc=$?
+  if [ "${hook_rc}" -eq 1 ]; then
+    if [ "${LAST_HOOK}" != "missing" ]; then
+      log_ts "error: ${PF_HOOK_MISSING_MSG}"
+      LAST_HOOK="missing"
+    fi
+    if [ $((now - LAST_REPAIR)) -ge 30 ]; then
+      LAST_REPAIR="${now}"
+      if pf_conf_has_hook; then
+        log_ts "reloading ${ONEEXIT_PF_CONF} to restore the com.apple/* anchor"
+        pf_repair_main_ruleset || log_ts "error: pfctl -f ${ONEEXIT_PF_CONF} failed"
+        reason="${reason:-main ruleset reloaded}"
+      else
+        log_ts "error: ${ONEEXIT_PF_CONF} has no anchor \"com.apple/*\" either; restore the stock file"
+      fi
+    fi
+  elif [ "${hook_rc}" -eq 0 ] && [ "${LAST_HOOK}" = "missing" ]; then
+    log_ts "main pf ruleset has the com.apple/* anchor again"
+    LAST_HOOK="ok"
+  fi
+
   if ! pf_enabled; then
     log_ts "pf is disabled; enabling"
     pf_enable || log_ts "error: pfctl -E failed"
@@ -166,27 +191,31 @@ check_once() {
     restore_tunnel_dns
   fi
 
-  # Our anchor only counts if the main ruleset still calls com.apple/*.
-  pf_main_has_hook || hook_rc=$?
-  if [ "${hook_rc}" -eq 1 ] && [ "${LAST_HOOK}" != "missing" ]; then
-    log_ts "error: ${PF_HOOK_MISSING_MSG}"
-    LAST_HOOK="missing"
-  elif [ "${hook_rc}" -eq 0 ] && [ "${LAST_HOOK}" = "missing" ]; then
-    log_ts "main pf ruleset has the com.apple/* anchor again"
-    LAST_HOOK="ok"
-  fi
-
   LAST_MODE="${mode}"
   return 0
 }
 
 on_term() {
   log_ts "stopping; rules stay loaded"
+  rm -f "${PID_FILE}" 2>/dev/null || true
   exit 0
 }
 trap on_term TERM INT
 
+# newsyslog rotates the log and sends SIGUSR1 (pid file below); launchd keeps
+# the old file open, so reopen stdout/stderr on the new one ourselves.
+PID_FILE="${ONEEXIT_RUN_DIR}/firewalld.pid"
+LOG_FILE="${ONEEXIT_LOG_DIR}/firewall.log"
+on_usr1() {
+  exec >>"${LOG_FILE}" 2>&1
+  log_ts "log reopened after rotation"
+}
+
 run mkdir -p "${ONEEXIT_RUN_DIR}" "${ONEEXIT_LOG_DIR}"
+if ! is_dry_run; then
+  printf '%s\n' "$$" >"${PID_FILE}"
+  trap on_usr1 USR1
+fi
 log_ts "oneexit-firewalld ${ONEEXIT_VERSION} starting (interval ${INTERVAL}s)"
 
 while :; do

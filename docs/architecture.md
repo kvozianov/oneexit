@@ -169,7 +169,10 @@ pass in quick on utun3 proto icmp all keep state
   IPv6 still blocked). On expiry, or on `oneexit lock`, the daemons restore DNS to `TUNNEL_DNS`,
   reload the locked ruleset and bring `wg0` up again. `oneexit unlock` is the same with the
   unlocked ruleset (`pass all`) and the tunnel left as it is. `oneexit lock` ends either window early.
-- `oneexit-tunneld`: `wg-quick up wg0`; every 10 s reads `wg show wg0 latest-handshakes`;
+- `oneexit-tunneld`: `wg-quick up wg0`; every 10 s reads `wg show utunN latest-handshakes`, where
+  `utunN` is the real device from `/var/run/wireguard/wg0.name` (trusted only if
+  `/var/run/wireguard/utunN.sock` exists; `wg show wg0` does not work on macOS because wireguard-go's
+  socket is named after the utun device, and only wg-quick translates the name);
   if the handshake is older than 180 s or the default route interface changed, `wg-quick down` + `up`.
 - CLI `oneexit`:
   `status` (pf enabled, anchor loaded, lock state, handshake age, external IP via tunnel),
@@ -178,6 +181,15 @@ pass in quick on utun3 proto icmp all keep state
   Every subcommand supports `--dry-run` where it changes state. Subcommands that need root
   (everything except `version` and `--help`) re-exec themselves with `sudo` when not root and not
   in dry-run, so the documented form is plain `oneexit status`.
+- The installed `wg0.conf` differs from the peer config in two lines: the `DNS =` line is removed
+  (wg-quick would otherwise save and restore DNS behind oneexit's back and undo portal windows) and
+  `Endpoint` is pinned to `VPS_IP:VPS_PORT` (a hostname could not be resolved once DNS is pinned to
+  the tunnel). `PHYS_IFACES=auto` (the default unless `--iface` is given) makes the firewall daemon
+  re-read the physical `en*` ports on every pass. If the main ruleset loses the `com.apple/*` hook,
+  the daemon reloads the stock `/etc/pf.conf` (at most every 30 s) and then its anchor. `wg show`
+  is always called with the real `utunN` device (`wg_dev`), never `wg0`, because wireguard-go names
+  its socket after the device. Daemons write `/var/run/oneexit/*.pid`; `/etc/newsyslog.d/oneexit.conf`
+  rotates the logs at 1 MB and signals the daemons to reopen them.
 - `setup.sh` is idempotent: running it again over an existing installation updates files in place,
   so `uninstall.sh --keep-keys` followed by `setup.sh` is the documented way to change the VPS.
 - `uninstall.sh [--keep-keys] [--dry-run]` (`--keep-keys` keeps `/usr/local/etc/wireguard/wg0.conf`): `launchctl bootout`, remove plists, flush anchor

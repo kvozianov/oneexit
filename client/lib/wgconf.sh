@@ -76,6 +76,38 @@ parsed_value() {
     { eq = index($0, "="); if (substr($0, 1, eq - 1) == want) { print substr($0, eq + 1); exit } }'
 }
 
+# render_installed_wg_conf FILE VPS_IP VPS_PORT: FILE as it is installed for
+# wg-quick: every DNS line in [Interface] dropped (oneexit sets DNS itself;
+# wg-quick would restore its saved DNS on down and undo portal/unlock) and the
+# [Peer] Endpoint pinned to VPS_IP:VPS_PORT (a hostname could not be resolved
+# once DNS points into the tunnel). Prints the private key: write the result
+# with write_secret_file only.
+render_installed_wg_conf() {
+  local file="$1" ip="$2" port="$3"
+  [ -r "${file}" ] || return 1
+  awk -v endpoint="${ip}:${port}" '
+    {
+      line = $0
+      probe = line
+      sub(/^[ \t]+/, "", probe)
+      if (probe ~ /^\[/) {
+        section = tolower(probe)
+        sub(/\].*/, "]", section)
+        print line
+        next
+      }
+      eq = index(probe, "=")
+      key = ""
+      if (eq > 0) {
+        key = tolower(substr(probe, 1, eq - 1))
+        gsub(/[ \t]/, "", key)
+      }
+      if (section == "[interface]" && key == "dns") next
+      if (section == "[peer]" && key == "endpoint") { print "Endpoint = " endpoint; next }
+      print line
+    }' "${file}"
+}
+
 # resolve_host HOST: print one IPv4 address for HOST. IPv4 literals pass through.
 resolve_host() {
   local host="$1" ip=""

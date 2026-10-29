@@ -76,7 +76,7 @@ for label in "${ONEEXIT_TUNNEL_LABEL}" "${ONEEXIT_FIREWALL_LABEL}"; do
 done
 
 log_step "Bringing the tunnel down"
-if command -v wg >/dev/null 2>&1 && wg show wg0 >/dev/null 2>&1; then
+if wg_tunnel_up; then
   run wg-quick down "${WG_IFACE_CONF}" || log_warn "wg-quick down failed"
 elif is_dry_run; then
   run wg-quick down "${WG_IFACE_CONF}"
@@ -112,6 +112,7 @@ EOT
 set_dns_all empty
 
 log_step "Removing installed files"
+run rm -f "${ONEEXIT_NEWSYSLOG_CONF}"
 run rm -f "${ONEEXIT_BIN}"
 run rm -rf "${ONEEXIT_LIBEXEC}" "${ONEEXIT_RUN_DIR}" "${ONEEXIT_LOG_DIR}"
 run rm -rf "${ONEEXIT_ETC_DIR}"

@@ -23,25 +23,28 @@ ONEEXIT_LOG_DIR="${ONEEXIT_LOG_DIR:-/var/log/oneexit}"
 ONEEXIT_RUN_DIR="${ONEEXIT_RUN_DIR:-/var/run/oneexit}"
 ONEEXIT_WG_RUN_DIR="${ONEEXIT_WG_RUN_DIR:-/var/run/wireguard}"
 ONEEXIT_PF_CONF="${ONEEXIT_PF_CONF:-/etc/pf.conf}"
+ONEEXIT_NEWSYSLOG_CONF="${ONEEXIT_NEWSYSLOG_CONF:-/etc/newsyslog.d/oneexit.conf}"
 ONEEXIT_TUN_PLACEHOLDER="utun99"
 ONEEXIT_FIREWALL_LABEL="com.oneexit.firewall"
 ONEEXIT_TUNNEL_LABEL="com.oneexit.tunnel"
 ONEEXIT_DEFAULT_DNS="10.66.0.1"
 
-# Daemons started by launchd get a minimal PATH; make Homebrew tools findable
-# without letting them shadow anything already on PATH.
-case ":${PATH}:" in
-  *:/opt/homebrew/bin:*) ;;
-  *) PATH="${PATH}:/opt/homebrew/bin:/opt/homebrew/sbin" ;;
-esac
-case ":${PATH}:" in
-  *:/usr/local/bin:*) ;;
-  *) PATH="${PATH}:/usr/local/bin:/usr/local/sbin" ;;
-esac
-case ":${PATH}:" in
-  *:/usr/sbin:*) ;;
-  *) PATH="${PATH}:/usr/sbin:/sbin" ;;
-esac
+# sudo and launchd give a bare PATH. Put the Homebrew directories in front
+# (wg-quick needs Homebrew's bash 4+, not /bin/bash 3.2), but leave a directory
+# where it is if PATH already has it, so callers keep their own order.
+for _p in /usr/local/sbin /usr/local/bin /opt/homebrew/sbin /opt/homebrew/bin; do
+  case ":${PATH}:" in
+    *":${_p}:"*) ;;
+    *) [ -d "${_p}" ] && PATH="${_p}:${PATH}" ;;
+  esac
+done
+for _p in /usr/bin /bin /usr/sbin /sbin; do
+  case ":${PATH}:" in
+    *":${_p}:"*) ;;
+    *) PATH="${PATH}:${_p}" ;;
+  esac
+done
+unset _p
 export PATH
 
 # ---------------------------------------------------------------- logging
@@ -125,6 +128,27 @@ write_file() {
   dir="$(dirname "${path}")"
   mkdir -p "${dir}"
   tmp="$(mktemp "${dir}/.oneexit.XXXXXX")"
+  printf '%s\n' "${content}" >"${tmp}"
+  chmod "${mode}" "${tmp}"
+  mv -f "${tmp}" "${path}"
+}
+
+# write_secret_file PATH MODE < content
+# Like write_file, but the temp file is private from the start and dry-run
+# output hides PrivateKey / PresharedKey values.
+write_secret_file() {
+  local path="$1" mode="$2" content dir tmp
+  content="$(cat)"
+  if is_dry_run; then
+    printf '[dry-run] write %s (mode %s, keys hidden):\n' "${path}" "${mode}"
+    printf '%s\n' "${content}" |
+      sed -E 's/^([[:space:]]*(PrivateKey|PresharedKey)[[:space:]]*=).*/\1 (hidden)/I' |
+      sed 's/^/    | /'
+    return 0
+  fi
+  dir="$(dirname "${path}")"
+  mkdir -p "${dir}"
+  tmp="$(umask 077 && mktemp "${dir}/.oneexit.XXXXXX")"
   printf '%s\n' "${content}" >"${tmp}"
   chmod "${mode}" "${tmp}"
   mv -f "${tmp}" "${path}"
@@ -288,12 +312,25 @@ phys_ifaces() {
   printf '%s\n' "${list}"
 }
 
+# effective_phys_ifaces: PHYS_IFACES from the config, or the live hardware
+# ports when it is "auto" (or unset), so a new USB/Thunderbolt adapter works.
+effective_phys_ifaces() {
+  case "${PHYS_IFACES:-auto}" in
+    auto | '') phys_ifaces ;;
+    *) printf '%s\n' "${PHYS_IFACES}" ;;
+  esac
+}
+
 # tunnel_iface [WG_ADDRESS]: the utun device that carries the WireGuard tunnel.
-# wg-quick on macOS records it in /var/run/wireguard/wg0.name.
+# Like wg-quick's get_real_interface: the name recorded in wg0.name only
+# counts if wireguard-go's control socket for that device exists.
 tunnel_iface() {
   local addr="${1:-}" name=""
   if [ -r "${ONEEXIT_WG_RUN_DIR}/wg0.name" ]; then
     name="$(head -n 1 "${ONEEXIT_WG_RUN_DIR}/wg0.name" 2>/dev/null | tr -d '[:space:]')" || name=""
+    if [ -z "${name}" ] || [ ! -e "${ONEEXIT_WG_RUN_DIR}/${name}.sock" ]; then
+      name=""
+    fi
   fi
   if [ -z "${name}" ] && command -v wg >/dev/null 2>&1; then
     name="$(wg show interfaces 2>/dev/null | awk '{ print $1 }')" || name=""
@@ -308,16 +345,37 @@ tunnel_iface() {
   printf '%s\n' "${name}"
 }
 
-# tunnel_iface_or_placeholder: the live utun device, or utun99 (matches
-# nothing) while the tunnel is down, so pf only lets DHCP and the endpoint out.
-tunnel_iface_or_placeholder() {
+# wg_dev: the real utunN device to pass to "wg show" (wireguard-go's socket
+# is named after it; "wg show wg0" does not work on macOS). Empty and 1 if
+# the tunnel is down.
+wg_dev() {
   local name
   name="$(tunnel_iface 2>/dev/null || true)"
   if is_utun_name "${name}"; then
     printf '%s\n' "${name}"
-  else
-    printf '%s\n' "${ONEEXIT_TUN_PLACEHOLDER}"
+    return 0
   fi
+  return 1
+}
+
+# wg_tunnel_up: 0 if wireguard-go answers on the tunnel's utun device.
+wg_tunnel_up() {
+  local dev
+  command -v wg >/dev/null 2>&1 || return 1
+  dev="$(wg_dev)" || return 1
+  wg show "${dev}" >/dev/null 2>&1
+}
+
+# tunnel_iface_or_placeholder: the live utun device, or utun99 (matches
+# nothing) while the tunnel is down, so pf only lets DHCP and the endpoint out.
+tunnel_iface_or_placeholder() {
+  wg_dev || printf '%s\n' "${ONEEXIT_TUN_PLACEHOLDER}"
+}
+
+# route_default_iface: "interface:" of route -n get default.
+route_default_iface() {
+  command -v route >/dev/null 2>&1 || return 1
+  route -n get default 2>/dev/null | awk '$1 == "interface:" { print $2; found = 1; exit } END { exit !found }'
 }
 
 # default_route_iface: interface of the IPv4 default route (ignoring utun).

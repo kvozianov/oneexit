@@ -43,6 +43,22 @@ setup() {
   [ "${output}" = "203.0.113.5:51820" ]
 }
 
+@test "render_installed_wg_conf drops DNS and pins the Endpoint" {
+  run render_installed_wg_conf "${FIXTURES}/peer-hostname.conf" 198.51.100.20 443
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"Endpoint = 198.51.100.20:443"* ]]
+  [[ "${output}" == *"PublicKey = FAKEserverPUBLICkeyFAKEserverPUBLICkeyFAKE00="* ]]
+  [[ "${output}" == *"AllowedIPs = 0.0.0.0/0"* ]]
+  [ -z "$(printf '%s\n' "${output}" | grep -i '^DNS' || true)" ]
+  [[ "${output}" != *"vpn.example.com"* ]]
+}
+
+@test "resolve_host resolves a hostname through the resolver" {
+  run resolve_host vpn.example.com
+  [ "${status}" -eq 0 ]
+  [ "${output}" = "198.51.100.20" ]
+}
+
 @test "resolve_host passes an IPv4 address through unchanged" {
   run resolve_host 203.0.113.5
   [ "${status}" -eq 0 ]
@@ -58,6 +74,28 @@ setup() {
   [ "${status}" -eq 0 ]
   FAKE_DISK=fail run boot_volume_is_external
   [ "${status}" -eq 2 ]
+}
+
+@test "wg_dev finds utun3 only when wg0.name and its socket exist; wg show wg0 fails" {
+  run wg_dev
+  [ "${status}" -eq 1 ]
+  [ -z "${output}" ]
+  ONEEXIT_WG_RUN_DIR="${FIXTURES}/wireguard" run wg_dev
+  [ "${output}" = "utun3" ]
+  ONEEXIT_WG_RUN_DIR="${FIXTURES}/wireguard" run wg_tunnel_up
+  [ "${status}" -eq 0 ]
+  echo utun3 >"${ONEEXIT_WG_RUN_DIR}/wg0.name"
+  run wg_dev
+  [ "${status}" -eq 1 ]
+  run wg show wg0
+  [ "${status}" -ne 0 ]
+}
+
+@test "effective_phys_ifaces: auto follows the hardware ports, a fixed list wins" {
+  PHYS_IFACES=auto run effective_phys_ifaces
+  [ "${output}" = "en0 en7" ]
+  PHYS_IFACES="en1" run effective_phys_ifaces
+  [ "${output}" = "en1" ]
 }
 
 @test "network_services drops the header and disabled services" {

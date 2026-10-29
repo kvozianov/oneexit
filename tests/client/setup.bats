@@ -30,8 +30,10 @@ setup() {
   [[ "${output}" == *"[dry-run] write ${ONEEXIT_CONFIG} (mode 0644)"* ]]
   [[ "${output}" == *"| VPS_IP=203.0.113.5"* ]]
   [[ "${output}" == *"| TUNNEL_DNS=10.66.0.1"* ]]
-  [[ "${output}" == *'| PHYS_IFACES="en0 en7"'* ]]
-  [[ "${output}" == *"install -m 0600 -o root -g wheel ${PEER_CONF} ${ONEEXIT_WG_CONF}"* ]]
+  [[ "${output}" == *'| PHYS_IFACES="auto"'* ]]
+  [[ "${output}" == *"[dry-run] write ${ONEEXIT_WG_CONF} (mode 0600, keys hidden)"* ]]
+  [[ "${output}" == *"[dry-run] write ${ONEEXIT_NEWSYSLOG_CONF} (mode 0644)"* ]]
+  [[ "${output}" == *"${ONEEXIT_LOG_DIR}/firewall.log    root:wheel    644  5     1024"* ]]
   [[ "${output}" == *"[dry-run] write ${ONEEXIT_ANCHOR_FILE} (mode 0644)"* ]]
   [[ "${output}" == *"| pass out quick on { en0 en7 } proto udp from any to 203.0.113.5 port 51820 keep state"* ]]
   [[ "${output}" == *"| pass out quick on utun99 proto { tcp udp icmp } all keep state"* ]]
@@ -45,6 +47,31 @@ setup() {
   [[ "${output}" == *"leak-test.sh ${ONEEXIT_LIBEXEC}/leak-test.sh"* ]]
   [ ! -e "${ONEEXIT_CONFIG}" ]
   [ ! -e "${ONEEXIT_ANCHOR_FILE}" ]
+}
+
+@test "setup.sh installs wg0.conf without DNS, keeps TUNNEL_DNS from the peer conf" {
+  FAKE_DISK=external run "${CLIENT_DIR}/setup.sh" --config "${PEER_CONF}" --dry-run
+  [ "${status}" -eq 0 ]
+  conf="$(dry_run_block "${output}" "${ONEEXIT_WG_CONF}")"
+  [[ "${conf}" == *"[Interface]"* ]]
+  [[ "${conf}" == *"Address = 10.66.0.2/32"* ]]
+  [[ "${conf}" == *"PrivateKey = (hidden)"* ]]
+  [[ "${conf}" == *"Endpoint = 203.0.113.5:51820"* ]]
+  [ -z "$(printf '%s\n' "${conf}" | grep -i '^[[:space:]]*DNS[[:space:]]*=' || true)" ]
+  [ "$(dry_run_block "${output}" "${ONEEXIT_CONFIG}" | grep '^TUNNEL_DNS=')" = "TUNNEL_DNS=10.66.0.1" ]
+}
+
+@test "setup.sh pins a hostname Endpoint to the resolved IP" {
+  FAKE_DISK=external run "${CLIENT_DIR}/setup.sh" --config "${FIXTURES}/peer-hostname.conf" --dry-run
+  [ "${status}" -eq 0 ]
+  cfg="$(dry_run_block "${output}" "${ONEEXIT_CONFIG}")"
+  [[ "${cfg}" == *"VPS_IP=198.51.100.20"* ]]
+  [[ "${cfg}" == *"VPS_PORT=443"* ]]
+  [[ "${cfg}" == *"VPS_HOST=vpn.example.com"* ]]
+  conf="$(dry_run_block "${output}" "${ONEEXIT_WG_CONF}")"
+  [[ "${conf}" == *"Endpoint = 198.51.100.20:443"* ]]
+  [[ "${conf}" != *"vpn.example.com"* ]]
+  [[ "${output}" == *"| pass out quick on { en0 en7 } proto udp from any to 198.51.100.20 port 443 keep state"* ]]
 }
 
 @test "setup.sh refuses when pf.conf lacks the com.apple/* anchor hook" {
@@ -87,6 +114,7 @@ setup() {
   [[ "${output}" == *"[dry-run] networksetup -setv6automatic Wi-Fi"* ]]
   [[ "${output}" == *"[dry-run] networksetup -setdnsservers Wi-Fi empty"* ]]
   [[ "${output}" == *"[dry-run] rm -f ${ONEEXIT_WG_CONF}"* ]]
+  [[ "${output}" == *"[dry-run] rm -f ${ONEEXIT_NEWSYSLOG_CONF}"* ]]
 }
 
 @test "uninstall.sh --keep-keys keeps wg0.conf; pfctl -d only if pf was off before" {

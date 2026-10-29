@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Test stub for dig: only vpn.example.com resolves.
+for arg in "$@"; do last="${arg}"; done
+case "${last:-}" in
+  vpn.example.com) echo "198.51.100.20" ;;
+  *) ;;
+esac
+exit 0

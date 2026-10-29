@@ -73,12 +73,16 @@ daemon_loaded() {
 
 # handshake_age: seconds since the newest handshake; "none" or "unknown".
 handshake_age() {
-  local out hs
+  local out hs dev
   if ! command -v wg >/dev/null 2>&1; then
     echo "unknown (wg not installed)"
     return 0
   fi
-  if ! out="$(wg show wg0 latest-handshakes 2>&1)"; then
+  if ! dev="$(wg_dev)"; then
+    echo "none (tunnel down)"
+    return 0
+  fi
+  if ! out="$(wg show "${dev}" latest-handshakes 2>&1)"; then
     case "${out}" in
       *ermission* | *ot\ permitted*) echo "unknown (needs sudo)" ;;
       *) echo "none (tunnel down)" ;;
@@ -207,7 +211,7 @@ cmd_status() {
     *) printf '  pf hook:      %s\n' "$(hook_status_word)" ;;
   esac
   printf '  mode:         %s\n' "$(mode_description)"
-  tun="$(tunnel_iface || true)"
+  tun="$(wg_dev || true)"
   printf '  tunnel:       %s\n' "${tun:-down}"
   printf '  handshake:    %s\n' "$(handshake_age)"
   local ip
@@ -268,7 +272,7 @@ cmd_portal() {
   # tunnel has to be down (it routes all IPv4); oneexit-tunneld takes it down
   # for the window and brings it back afterwards.
   set_dns_all empty
-  if command -v wg >/dev/null 2>&1 && wg show wg0 >/dev/null 2>&1 || is_dry_run; then
+  if wg_tunnel_up || is_dry_run; then
     run wg-quick down "${WG_IFACE_CONF}" || log_warn "wg-quick down failed"
   fi
   cat <<MSG
@@ -287,7 +291,7 @@ cmd_up() {
   load_config || true
   log_step "Starting the tunnel"
   if daemon_loaded "${ONEEXIT_TUNNEL_LABEL}"; then
-    if command -v wg >/dev/null 2>&1 && wg show wg0 >/dev/null 2>&1; then
+    if wg_tunnel_up; then
       log_ok "tunnel is already up"
     else
       run wg-quick up "${WG_IFACE_CONF}"
@@ -412,7 +416,7 @@ cmd_doctor() {
     else
       doc_bad "endpoint" "invalid VPS_IP/VPS_PORT in ${ONEEXIT_CONFIG}"
     fi
-    doc_info "interfaces" "${PHYS_IFACES:-en0}"
+    doc_info "interfaces" "${PHYS_IFACES:-auto} (now: $(effective_phys_ifaces))"
   else
     doc_bad "config" "${ONEEXIT_CONFIG} missing (run client/setup.sh)"
   fi
@@ -467,7 +471,7 @@ cmd_doctor() {
   doc_info "tunnel in pf" "$(tunnel_iface_or_placeholder)"
 
   printf '\nTunnel\n'
-  tun="$(tunnel_iface || true)"
+  tun="$(wg_dev || true)"
   if [ -n "${tun}" ]; then doc_ok "interface" "${tun}"; else doc_bad "interface" "no WireGuard interface (sudo oneexit up)"; fi
   hs="$(handshake_age)"
   case "${hs}" in

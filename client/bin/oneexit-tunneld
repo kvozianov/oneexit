@@ -75,19 +75,22 @@ done
 
 require_root
 
-WG_NAME="wg0"
 UP_SINCE=0
 LAST_ROUTE_IF=""
+LAST_STATE=""
 
-tunnel_is_up() {
-  command -v wg >/dev/null 2>&1 || return 1
-  wg show "${WG_NAME}" >/dev/null 2>&1
-}
+# "wg show wg0" does not work on macOS (wireguard-go's socket is named after
+# the utun device), so everything below goes through wg_dev.
+tunnel_is_up() { wg_tunnel_up; }
 
 # latest_handshake: newest handshake epoch over all peers (0 = none yet).
 latest_handshake() {
-  local value
-  value="$(wg show "${WG_NAME}" latest-handshakes 2>/dev/null |
+  local value dev
+  dev="$(wg_dev)" || {
+    printf '0\n'
+    return 0
+  }
+  value="$(wg show "${dev}" latest-handshakes 2>/dev/null |
     awk 'BEGIN { max = 0 } $2 + 0 > max { max = $2 + 0 } END { print max }')" || value=0
   is_uint "${value}" || value=0
   printf '%s\n' "${value}"
@@ -138,8 +141,13 @@ check_once() {
 
   if ! tunnel_is_up; then
     log_ts "tunnel is down"
+    LAST_STATE="down"
     tunnel_up
     return 0
+  fi
+  if [ "${LAST_STATE}" != "up" ]; then
+    log_ts "tunnel is up on $(wg_dev || true)"
+    LAST_STATE="up"
   fi
 
   [ "${UP_SINCE}" -gt 0 ] || UP_SINCE="${now}"
@@ -170,11 +178,24 @@ check_once() {
 
 on_term() {
   log_ts "stopping; tunnel left as is"
+  rm -f "${PID_FILE}" 2>/dev/null || true
   exit 0
 }
 trap on_term TERM INT
 
+# newsyslog rotates the log and sends SIGUSR1; reopen stdout/stderr.
+PID_FILE="${ONEEXIT_RUN_DIR}/tunneld.pid"
+LOG_FILE="${ONEEXIT_LOG_DIR}/tunnel.log"
+on_usr1() {
+  exec >>"${LOG_FILE}" 2>&1
+  log_ts "log reopened after rotation"
+}
+
 run mkdir -p "${ONEEXIT_RUN_DIR}" "${ONEEXIT_LOG_DIR}"
+if ! is_dry_run; then
+  printf '%s\n' "$$" >"${PID_FILE}"
+  trap on_usr1 USR1
+fi
 load_config || true
 log_ts "oneexit-tunneld ${ONEEXIT_VERSION} starting (interval ${INTERVAL}s, conf ${WG_IFACE_CONF})"
 

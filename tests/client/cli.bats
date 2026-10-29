@@ -73,6 +73,15 @@ setup() {
   [[ "${output}" != *"wg-quick up"* ]]
 }
 
+@test "oneexit-tunneld sees a running tunnel via wg0.name + socket and leaves it alone" {
+  write_test_config
+  ONEEXIT_WG_RUN_DIR="${FIXTURES}/wireguard" run "${CLIENT_DIR}/bin/oneexit-tunneld" --once --dry-run
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"tunnel is up on utun3"* ]]
+  [[ "${output}" != *"wg-quick up"* ]]
+  [[ "${output}" != *"wg-quick down"* ]]
+}
+
 @test "oneexit-tunneld brings the tunnel up when no window is open" {
   write_test_config
   run "${CLIENT_DIR}/bin/oneexit-tunneld" --once --dry-run
@@ -125,11 +134,20 @@ setup() {
   [[ "${output}" == *"[dry-run] pfctl -a com.apple/oneexit -f ${ONEEXIT_ANCHOR_FILE}"* ]]
 }
 
-@test "oneexit-firewalld logs an error when the com.apple/* hook is missing" {
+@test "oneexit-firewalld with PHYS_IFACES=auto uses the live hardware ports" {
+  write_test_config 203.0.113.5 auto
+  run "${CLIENT_DIR}/bin/oneexit-firewalld" --once --dry-run
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"| pass out quick on { en0 en7 } proto udp from any to 203.0.113.5 port 51820 keep state"* ]]
+}
+
+@test "oneexit-firewalld logs and repairs a missing com.apple/* hook" {
   write_test_config
   FAKE_PFCTL=nohook run "${CLIENT_DIR}/bin/oneexit-firewalld" --once --dry-run
   [ "${status}" -eq 0 ]
   [[ "${output}" == *'error: main pf ruleset has no "com.apple/*" anchor; the kill switch is not active'* ]]
+  [[ "${output}" == *"[dry-run] pfctl -f ${ONEEXIT_PF_CONF}"* ]]
+  [[ "${output}" == *"[dry-run] pfctl -a com.apple/oneexit -f ${ONEEXIT_ANCHOR_FILE}"* ]]
   FAKE_PFCTL=hook run "${CLIENT_DIR}/bin/oneexit-firewalld" --once --dry-run
   [[ "${output}" != *"kill switch is not active"* ]]
 }
@@ -148,6 +166,7 @@ setup() {
   [[ "${output}" == *"[dry-run] curl -6 -s -m 5 https://api64.ipify.org"* ]]
   [[ "${output}" == *"[dry-run] dig +short"*"whoami.akamai.net"* ]]
   [[ "${output}" == *"[dry-run] pfctl -s rules"* ]]
+  [[ "${output}" == *"[dry-run] route -n get default"* ]]
   [ "$(printf '%s\n' "${output}" | grep -Ec '^(PASS|FAIL|SKIP|INFO) ')" -eq 8 ]
 }
 

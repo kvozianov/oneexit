@@ -47,7 +47,8 @@ Checks, each reported as PASS, FAIL, SKIP or INFO:
 
 Options:
   --expect-ip IP   expected public IPv4 (default: VPS_IP from ${ONEEXIT_CONFIG})
-  --iface IFACE    physical interface for the direct check (default: first of PHYS_IFACES, else en0)
+  --iface IFACE    physical interface for the direct check (default: the interface of
+                   the default route from "route -n get default")
   --json           print the results as a JSON array
   --dry-run        print the commands that would run; run nothing
   --help           show this help
@@ -90,10 +91,6 @@ while [ "$#" -gt 0 ]; do
 done
 
 load_config || true
-if [ -z "${IFACE}" ]; then
-  IFACE="${PHYS_IFACES%% *}"
-  [ -n "${IFACE}" ] || IFACE="en0"
-fi
 
 # ---------------------------------------------------------------- results
 
@@ -189,9 +186,9 @@ check_pf() {
 }
 
 check_handshake() {
-  local out hs age
+  local out hs age dev
   if is_dry_run; then
-    show_cmd wg show wg0 latest-handshakes
+    show_cmd wg show "$(wg_dev || echo "<utun device>")" latest-handshakes
     record SKIP handshake "dry-run"
     return 0
   fi
@@ -203,8 +200,12 @@ check_handshake() {
     record SKIP handshake "needs root (run with sudo)"
     return 0
   fi
-  if ! out="$(wg show wg0 latest-handshakes 2>&1)"; then
-    record FAIL handshake "tunnel wg0 is not up"
+  if ! dev="$(wg_dev)"; then
+    record FAIL handshake "tunnel wg0 is not up (no utun device)"
+    return 0
+  fi
+  if ! out="$(wg show "${dev}" latest-handshakes 2>&1)"; then
+    record FAIL handshake "wg show ${dev} failed: ${out}"
     return 0
   fi
   hs="$(printf '%s\n' "${out}" | awk 'BEGIN { m = 0 } $2 + 0 > m { m = $2 + 0 } END { print m }')"
@@ -214,7 +215,7 @@ check_handshake() {
   fi
   age=$(($(now_epoch) - hs))
   if [ "${age}" -le "${MAX_HANDSHAKE_AGE}" ]; then
-    record PASS handshake "last handshake ${age} s ago"
+    record PASS handshake "last handshake on ${dev} ${age} s ago"
   else
     record FAIL handshake "last handshake ${age} s ago (> ${MAX_HANDSHAKE_AGE} s)"
   fi
@@ -289,12 +290,37 @@ check_dns() {
   fi
 }
 
+# direct_iface: --iface, else the interface of the default route
+# (route -n get default), else the first physical interface, else en0.
+direct_iface() {
+  local dev
+  if [ -n "${IFACE}" ]; then
+    printf '%s\n' "${IFACE}"
+    return 0
+  fi
+  dev="$(route_default_iface || true)"
+  case "${dev}" in
+    '' | utun* | lo*) dev="$(default_route_iface || true)" ;;
+    *) ;;
+  esac
+  case "${dev}" in
+    '' | utun* | lo*)
+      dev="$(effective_phys_ifaces)"
+      dev="${dev%% *}"
+      ;;
+    *) ;;
+  esac
+  printf '%s\n' "${dev:-en0}"
+}
+
 check_direct() {
   if is_dry_run; then
-    show_cmd curl --interface "${IFACE}" -s -m 5 -o /dev/null http://1.1.1.1
+    show_cmd route -n get default
+    show_cmd curl --interface "<default-route interface>" -s -m 5 -o /dev/null http://1.1.1.1
     record SKIP direct "dry-run"
     return 0
   fi
+  IFACE="$(direct_iface)"
   if ! command -v curl >/dev/null 2>&1; then
     record SKIP direct "curl not found"
     return 0

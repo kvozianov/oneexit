@@ -75,10 +75,13 @@ Be clear about these before you rely on oneexit.
 - **Censorship of WireGuard.** WireGuard is easy to identify on the wire and oneexit
   does no obfuscation. A network that blocks it leaves you offline. `--port 443`
   changes only the port number.
-- **The boot window.** pf rules do not survive a reboot. Between the moment macOS
-  brings up the network and the moment `oneexit-firewalld` has loaded the anchor, there
-  are a few seconds in which the Mac can send traffic (for example if it auto-joins a
-  known Wi-Fi network).
+- **The boot window.** pf rules do not survive a reboot: pf is off until the first pass
+  of `oneexit-firewalld`, which launchd starts early but with no ordering guarantee
+  against Wi-Fi auto-join. If the Mac joins a known network first, a few seconds of early
+  system traffic (mDNS, NTP, Apple push, the captive-portal probe) can leave with the
+  network's real address before the anchor is loaded. To see how wide the window was on
+  a given boot, compare the first timestamp in `/var/log/oneexit/firewall.log` with the
+  network events in `log show --last boot`.
 - **Reloads are fixed within 5 seconds, not instantly.** If something disables pf or
   flushes the anchor, traffic can flow unfiltered until the next watchdog check, up to
   about 5 seconds later.
@@ -102,7 +105,7 @@ Be clear about these before you rely on oneexit.
 |---|---|
 | Lost or stolen SSD | Turn on FileVault for the external volume ([install guide](install-macos-external.md)). If the SSD is lost, revoke its peer: `sudo server/peer.sh revoke NAME`. |
 | Identity through Apple services | Do not sign in with an Apple ID or iCloud on this system. If you need the App Store, accept that Apple links this system to you. |
-| Boot window | Turn Wi-Fi off before you shut down, so the next boot does not join a network until you turn it on, by which time the firewall is loaded. Check with `oneexit status` before turning Wi-Fi on. |
+| Boot window | Turn Wi-Fi off (and unplug Ethernet) before you shut down, so the next boot does not join a network until you turn it on, by which time the firewall is loaded. Check with `oneexit status` before turning Wi-Fi on. To verify a past boot, compare the first line of `/var/log/oneexit/firewall.log` with `log show --last boot`. |
 | Portal window | Open the captive portal page first, finish the login, and close the window early with `sudo oneexit lock` once the tunnel is up. Do not use other apps during the window. |
 | Browser fingerprinting and cross-site tracking | Use a browser profile dedicated to this system, with no synced account, and sign in only where you need to. |
 | Server compromise | Keep the server updated (unattended-upgrades), SSH with keys only ([vps.md](vps.md#hygiene-the-installer-does-not-do)). Rebuilding the server is cheap; do it if in doubt. |
