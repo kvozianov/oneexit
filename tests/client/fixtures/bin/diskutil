@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Test stub for diskutil. FAKE_DISK selects the answer for "diskutil info /":
+#   internal (default), external, usb, fail
+set -euo pipefail
+[ "${1:-}" = "info" ] || exit 0
+case "${FAKE_DISK:-internal}" in
+  internal)
+    printf '%s\n' "   Device / Media Name:       APPLE SSD AP0512Z" \
+      "   Protocol:                  Apple Fabric" \
+      "   Device Location:           Internal" \
+      "   Removable Media:           Fixed" \
+      "   Solid State:               Yes"
+    ;;
+  external)
+    printf '%s\n' "   Device / Media Name:       Samsung T7" \
+      "   Protocol:                  PCI-Express" \
+      "   Device Location:           External" \
+      "   Removable Media:           Fixed"
+    ;;
+  usb)
+    printf '%s\n' "   Device / Media Name:       Portable SSD" \
+      "   Protocol:                  USB" \
+      "   Removable Media:           Fixed"
+    ;;
+  *) exit 1 ;;
+esac

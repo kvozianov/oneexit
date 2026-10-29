@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Test stub for netstat: default route on en0.
+printf '%s\n' "Routing tables" "" "Internet:" \
+  "Destination        Gateway            Flags               Netif Expire" \
+  "default            192.168.1.1        UGScg                 en0"

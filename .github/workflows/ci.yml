@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          files=$(git ls-files '*.sh' '*.bash' 'client/oneexit' 'client/bin/*')
+          echo "$files"
+          # shellcheck disable=SC2086
+          shellcheck -x $files
+      - name: bash -n
+        run: |
+          for f in $(git ls-files '*.sh' 'client/oneexit' 'client/bin/*'); do bash -n "$f"; done
+
+  bats:
+    name: bats (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then brew install bats-core; else sudo apt-get update -qq && sudo apt-get install -y -qq bats; fi
+          bats --version
+      - name: Unit tests
+        run: bats --print-output-on-failure tests/server tests/client
+      - name: Dry runs
+        run: |
+          bash server/install.sh --dry-run --endpoint 203.0.113.5
+          bash server/peer.sh add laptop --dry-run --endpoint 203.0.113.5
+          bash scripts/leak-test.sh --dry-run
+          bash client/uninstall.sh --dry-run
+
+  macos-dry-run:
+    name: macOS dry run + pf syntax
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Client setup dry run
+        run: |
+          cat > /tmp/peer.conf <<'EOF'
+          [Interface]
+          PrivateKey = cGxhY2Vob2xkZXJwcml2YXRla2V5MDAwMDAwMDAwMDA=
+          Address = 10.66.0.2/32
+          DNS = 10.66.0.1
+
+          [Peer]
+          PublicKey = cGxhY2Vob2xkZXJwdWJsaWNrZXkwMDAwMDAwMDAwMDA=
+          Endpoint = 203.0.113.5:51820
+          AllowedIPs = 0.0.0.0/0
+          PersistentKeepalive = 25
+          EOF
+          bash client/setup.sh --config /tmp/peer.conf --allow-internal-disk --dry-run
+      - name: pf syntax check of rendered rules
+        run: |
+          set -e
+          # shellcheck disable=SC1091
+          source client/lib/common.sh
+          # shellcheck disable=SC1091
+          source client/lib/pf.sh
+          render_pf 203.0.113.5 51820 utun3 en0 en1 > /tmp/oneexit.pf
+          render_pf_portal 203.0.113.5 51820 utun99 en0 > /tmp/oneexit-portal.pf
+          render_pf_unlocked > /tmp/oneexit-unlocked.pf
+          for f in /tmp/oneexit.pf /tmp/oneexit-portal.pf /tmp/oneexit-unlocked.pf; do
+            echo "--- $f"; cat "$f"
+            sudo pfctl -nvf "$f"
+          done
+      - name: plist lint
+        run: for p in client/launchd/*.plist; do plutil -lint "$p"; done
+      - name: CLI smoke
+        run: |
+          bash client/oneexit --help
+          bash client/oneexit version
+
+  server-install:
+    name: server install (real, ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the installer and the integration checks
+        run: sudo bash tests/server/integration.sh

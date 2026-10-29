@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Test stub for networksetup: fixed services and ports; setters do nothing.
+set -euo pipefail
+case "${1:-}" in
+  -listallnetworkservices)
+    printf '%s\n' "An asterisk (*) denotes that a network service is disabled." \
+      "Wi-Fi" "USB 10/100/1000 LAN" "*Thunderbolt Bridge"
+    ;;
+  -listallhardwareports)
+    [ "${FAKE_NO_PORTS:-0}" = "1" ] && exit 0
+    printf '%s\n' "" "Hardware Port: Wi-Fi" "Device: en0" "Ethernet Address: 00:00:00:00:00:01" \
+      "" "Hardware Port: Thunderbolt Bridge" "Device: bridge0" "Ethernet Address: 00:00:00:00:00:02" \
+      "" "Hardware Port: USB 10/100/1000 LAN" "Device: en7" "Ethernet Address: 00:00:00:00:00:03"
+    ;;
+  -getdnsservers) echo "There aren't any DNS Servers set on ${2:-}." ;;
+  *) exit 0 ;;
+esac

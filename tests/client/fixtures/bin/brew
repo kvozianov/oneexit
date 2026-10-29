@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Test stub for brew.
+exit 0

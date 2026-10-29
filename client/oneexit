@@ -1,0 +1,585 @@
+#!/usr/bin/env bash
+# oneexit: control and inspect the oneexit kill switch on this Mac.
+set -euo pipefail
+
+_self="${BASH_SOURCE[0]}"
+while [ -h "${_self}" ]; do
+  _dir="$(cd -P "$(dirname "${_self}")" && pwd)"
+  _self="$(readlink "${_self}")"
+  case "${_self}" in /*) ;; *) _self="${_dir}/${_self}" ;; esac
+done
+SELF_DIR="$(cd -P "$(dirname "${_self}")" && pwd)"
+LIB_DIR=""
+# A checkout (client/lib next to this file) wins over the installed copy.
+for _cand in "${ONEEXIT_LIB_DIR:-}" "${SELF_DIR}/lib" /usr/local/libexec/oneexit/lib; do
+  if [ -n "${_cand}" ] && [ -f "${_cand}/common.sh" ]; then
+    LIB_DIR="${_cand}"
+    break
+  fi
+done
+if [ -z "${LIB_DIR}" ]; then
+  echo "error: cannot find the oneexit libraries; expected /usr/local/libexec/oneexit/lib" >&2
+  exit 1
+fi
+# shellcheck source=lib/common.sh
+. "${LIB_DIR}/common.sh"
+# shellcheck source=lib/pf.sh
+. "${LIB_DIR}/pf.sh"
+# shellcheck source=lib/wgconf.sh
+. "${LIB_DIR}/wgconf.sh"
+
+usage() {
+  cat <<USAGE
+Usage: oneexit [--dry-run] COMMAND [options]
+
+Commands:
+  status                    pf, lock mode, tunnel, handshake and public IP at a glance
+  lock                      end any unlock/portal window now: locked ruleset,
+                            tunnel DNS restored
+  unlock [--minutes N]      allow direct traffic next to the tunnel for N minutes
+                            (default 10); DNS uses DHCP for the window
+  portal [--minutes N]      take the tunnel down and allow HTTP(S) and DNS on the
+                            physical interfaces for N minutes (default 3) to log
+                            in to a captive portal
+  up                        start the tunnel (and its watchdog)
+  down                      stop the tunnel and its watchdog; the kill switch stays on
+  leak-test [options]       run the leak test (see: oneexit leak-test --help)
+  doctor                    full diagnostics
+  logs [-f] [-n LINES]      show the firewall and tunnel logs
+  uninstall [options]       remove oneexit (see: oneexit uninstall --help)
+  version                   print the version
+  help                      show this help
+
+Commands that read pf or WireGuard state or change it re-run themselves with
+sudo. Commands that change state (lock, unlock, portal, up, down, uninstall)
+accept --dry-run to print what they would do instead.
+USAGE
+}
+
+# ---------------------------------------------------------------- helpers
+
+fmt_time() {
+  date -r "$1" '+%H:%M:%S' 2>/dev/null || printf 'epoch %s' "$1"
+}
+
+file_mode_owner() {
+  stat -f '%Lp %Su' "$1" 2>/dev/null || echo "? ?"
+}
+
+daemon_loaded() {
+  command -v launchctl >/dev/null 2>&1 || return 1
+  launchctl print "system/$1" >/dev/null 2>&1
+}
+
+# handshake_age: seconds since the newest handshake; "none" or "unknown".
+handshake_age() {
+  local out hs
+  if ! command -v wg >/dev/null 2>&1; then
+    echo "unknown (wg not installed)"
+    return 0
+  fi
+  if ! out="$(wg show wg0 latest-handshakes 2>&1)"; then
+    case "${out}" in
+      *ermission* | *ot\ permitted*) echo "unknown (needs sudo)" ;;
+      *) echo "none (tunnel down)" ;;
+    esac
+    return 0
+  fi
+  hs="$(printf '%s\n' "${out}" | awk 'BEGIN { m = 0 } $2 + 0 > m { m = $2 + 0 } END { print m }')"
+  if [ "${hs}" -eq 0 ]; then
+    echo "none yet"
+  else
+    echo "$(($(now_epoch) - hs)) s ago"
+  fi
+}
+
+pf_status_word() {
+  if ! is_root; then
+    echo "unknown (needs sudo)"
+  elif pf_enabled; then
+    echo "enabled"
+  else
+    echo "DISABLED"
+  fi
+}
+
+anchor_status_word() {
+  if ! is_root; then
+    echo "unknown (needs sudo)"
+  elif pf_anchor_loaded; then
+    echo "loaded"
+  else
+    echo "EMPTY"
+  fi
+}
+
+# hook_status_word: does the main ruleset still evaluate com.apple/*?
+hook_status_word() {
+  local rc=0
+  if ! is_root; then
+    echo "unknown (needs sudo)"
+    return 0
+  fi
+  pf_main_has_hook || rc=$?
+  case "${rc}" in
+    0) echo "present" ;;
+    1) echo "MISSING" ;;
+    *) echo "unknown (pfctl -s rules failed)" ;;
+  esac
+}
+
+mode_description() {
+  local line mode until now
+  now="$(now_epoch)"
+  line="$(pf_current_mode "${now}")"
+  mode="${line%% *}"
+  case "${mode}" in
+    locked) echo "locked" ;;
+    *)
+      until="${line#* }"
+      echo "${mode} until $(fmt_time "${until}") ($(((until - now + 59) / 60)) min left)"
+      ;;
+  esac
+}
+
+public_ipv4() {
+  command -v curl >/dev/null 2>&1 || return 1
+  curl -4 -s -m 5 https://api.ipify.org 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+}
+
+# parse_minutes DEFAULT ARGS...: sets MINUTES, handles --minutes/--dry-run.
+parse_minutes() {
+  MINUTES="$1"
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --minutes | -m)
+        [ "$#" -ge 2 ] || usage_error "--minutes needs a value"
+        MINUTES="$2"
+        shift
+        ;;
+      --minutes=*) MINUTES="${1#--minutes=}" ;;
+      --dry-run) DRY_RUN=1 ;;
+      *) usage_error "unknown option: $1" ;;
+    esac
+    shift
+  done
+  if ! is_uint "${MINUTES}" || [ "${MINUTES}" -lt 1 ] || [ "${MINUTES}" -gt 1440 ]; then
+    usage_error "--minutes must be between 1 and 1440"
+  fi
+}
+
+parse_dry_run_only() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dry-run) DRY_RUN=1 ;;
+      *) usage_error "unknown option: $1" ;;
+    esac
+    shift
+  done
+}
+
+tunnel_dns_args() { printf '%s' "${TUNNEL_DNS}" | tr ',' ' '; }
+
+# find_script PATH...: print the first PATH that exists.
+find_script() {
+  local candidate
+  for candidate in "$@"; do
+    if [ -f "${candidate}" ]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_status() {
+  local tun
+  load_config || true
+  printf 'oneexit %s\n' "${ONEEXIT_VERSION}"
+  printf '  pf:           %s\n' "$(pf_status_word)"
+  printf '  anchor:       %s\n' "$(anchor_status_word)"
+  case "$(hook_status_word)" in
+    present) printf '  pf hook:      anchor "com.apple/*" present\n' ;;
+    MISSING) printf '  pf hook:      FAIL: %s\n' "${PF_HOOK_MISSING_MSG}" ;;
+    *) printf '  pf hook:      %s\n' "$(hook_status_word)" ;;
+  esac
+  printf '  mode:         %s\n' "$(mode_description)"
+  tun="$(tunnel_iface || true)"
+  printf '  tunnel:       %s\n' "${tun:-down}"
+  printf '  handshake:    %s\n' "$(handshake_age)"
+  local ip
+  ip="$(public_ipv4 || true)"
+  if [ -z "${ip}" ]; then
+    printf '  public IPv4:  unreachable\n'
+  elif [ -n "${VPS_IP}" ] && [ "${ip}" = "${VPS_IP}" ]; then
+    printf '  public IPv4:  %s (your VPS)\n' "${ip}"
+  elif [ -n "${VPS_IP}" ]; then
+    printf '  public IPv4:  %s (NOT your VPS %s)\n' "${ip}" "${VPS_IP}"
+  else
+    printf '  public IPv4:  %s\n' "${ip}"
+  fi
+}
+
+cmd_lock() {
+  parse_dry_run_only "$@"
+  require_root
+  load_config || die "cannot read ${ONEEXIT_CONFIG}; run setup first"
+  log_step "Locking"
+  run rm -f "${ONEEXIT_RUN_DIR}/unlock-until" "${ONEEXIT_RUN_DIR}/portal-until"
+  pf_enabled || pf_enable
+  pf_apply_mode locked
+  # shellcheck disable=SC2046 # several DNS servers are separate arguments
+  set_dns_all $(tunnel_dns_args)
+  log_ok "kill switch active: only the tunnel to ${VPS_IP}:${VPS_PORT} is allowed"
+}
+
+cmd_unlock() {
+  local until
+  parse_minutes 10 "$@"
+  require_root
+  load_config || true
+  until=$(($(now_epoch) + MINUTES * 60))
+  log_step "Unlocking for ${MINUTES} min"
+  log_warn "all traffic is allowed until $(fmt_time "${until}"); apps can reach the internet outside the tunnel"
+  run mkdir -p "${ONEEXIT_RUN_DIR}"
+  run rm -f "${ONEEXIT_RUN_DIR}/portal-until"
+  printf '%s\n' "${until}" | write_file "${ONEEXIT_RUN_DIR}/unlock-until" 0644
+  pf_apply_mode unlocked
+  # Direct traffic needs the network's own DNS server; the tunnel stays up.
+  set_dns_all empty
+  log_ok "unlocked; oneexit-firewalld locks again and restores DNS at $(fmt_time "${until}") (or run: sudo oneexit lock)"
+}
+
+cmd_portal() {
+  local until
+  parse_minutes 3 "$@"
+  require_root
+  load_config || die "cannot read ${ONEEXIT_CONFIG}; run setup first"
+  until=$(($(now_epoch) + MINUTES * 60))
+  log_step "Captive portal mode for ${MINUTES} min"
+  run mkdir -p "${ONEEXIT_RUN_DIR}"
+  run rm -f "${ONEEXIT_RUN_DIR}/unlock-until"
+  printf '%s\n' "${until}" | write_file "${ONEEXIT_RUN_DIR}/portal-until" 0644
+  pf_apply_mode portal
+  # The portal's login page needs the network's own DNS server, and the
+  # tunnel has to be down (it routes all IPv4); oneexit-tunneld takes it down
+  # for the window and brings it back afterwards.
+  set_dns_all empty
+  if command -v wg >/dev/null 2>&1 && wg show wg0 >/dev/null 2>&1 || is_dry_run; then
+    run wg-quick down "${WG_IFACE_CONF}" || log_warn "wg-quick down failed"
+  fi
+  cat <<MSG
+The tunnel is down and HTTP, HTTPS and DNS may use the physical interfaces
+until $(fmt_time "${until}").
+Open http://captive.apple.com in a browser and log in to the network.
+When the page says "Success", run: sudo oneexit lock
+(When the time is up, oneexit-firewalld locks again and restores the tunnel
+DNS, and oneexit-tunneld brings the tunnel back up.)
+MSG
+}
+
+cmd_up() {
+  parse_dry_run_only "$@"
+  require_root
+  load_config || true
+  log_step "Starting the tunnel"
+  if daemon_loaded "${ONEEXIT_TUNNEL_LABEL}"; then
+    if command -v wg >/dev/null 2>&1 && wg show wg0 >/dev/null 2>&1; then
+      log_ok "tunnel is already up"
+    else
+      run wg-quick up "${WG_IFACE_CONF}"
+    fi
+  else
+    run launchctl enable "system/${ONEEXIT_TUNNEL_LABEL}"
+    run launchctl bootstrap system "${ONEEXIT_LAUNCHD_DIR}/${ONEEXIT_TUNNEL_LABEL}.plist"
+    log_ok "tunnel daemon started; check with: oneexit status"
+  fi
+}
+
+cmd_down() {
+  parse_dry_run_only "$@"
+  require_root
+  load_config || true
+  log_step "Stopping the tunnel"
+  if daemon_loaded "${ONEEXIT_TUNNEL_LABEL}" || is_dry_run; then
+    run launchctl bootout "system/${ONEEXIT_TUNNEL_LABEL}" || true
+  fi
+  run wg-quick down "${WG_IFACE_CONF}" || log_warn "wg-quick down failed (tunnel already down?)"
+  log_ok "tunnel stopped. The kill switch stays on, so nothing reaches the internet"
+  log_info "until 'sudo oneexit up' (or the next reboot)."
+}
+
+cmd_leak_test() {
+  local script
+  script="$(find_script "${ONEEXIT_LIBEXEC}/leak-test.sh" "${SELF_DIR}/../scripts/leak-test.sh")" ||
+    die "leak-test.sh not found"
+  exec bash "${script}" "$@"
+}
+
+cmd_uninstall() {
+  local script
+  script="$(find_script "${ONEEXIT_LIBEXEC}/uninstall.sh" "${SELF_DIR}/uninstall.sh")" ||
+    die "uninstall.sh not found"
+  exec bash "${script}" "$@"
+}
+
+cmd_logs() {
+  local follow=0 lines=50 files="" f
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -f | --follow) follow=1 ;;
+      -n | --lines)
+        if [ "$#" -lt 2 ] || ! is_uint "$2"; then
+          usage_error "--lines needs a number"
+        fi
+        lines="$2"
+        shift
+        ;;
+      *) usage_error "unknown option: $1" ;;
+    esac
+    shift
+  done
+  for f in "${ONEEXIT_LOG_DIR}/firewall.log" "${ONEEXIT_LOG_DIR}/tunnel.log"; do
+    if [ -r "${f}" ]; then
+      files="${files}${files:+ }${f}"
+    else
+      log_warn "${f} not found or not readable"
+    fi
+  done
+  [ -n "${files}" ] || return 1
+  # shellcheck disable=SC2086 # log paths contain no spaces
+  if [ "${follow}" -eq 1 ]; then
+    tail -n "${lines}" -F ${files}
+  else
+    tail -n "${lines}" ${files}
+  fi
+}
+
+DOCTOR_PROBLEMS=0
+doc_ok() { printf '  ok    %-16s %s\n' "$1" "$2"; }
+doc_bad() {
+  printf '  FAIL  %-16s %s\n' "$1" "$2"
+  DOCTOR_PROBLEMS=$((DOCTOR_PROBLEMS + 1))
+}
+doc_info() { printf '  ..    %-16s %s\n' "$1" "$2"; }
+
+doc_tool() {
+  local name="$1" path
+  path="$(command -v "${name}" 2>/dev/null || true)"
+  if [ -n "${path}" ]; then
+    doc_ok "${name}" "${path}"
+  else
+    doc_bad "${name}" "missing (brew install wireguard-tools wireguard-go)"
+  fi
+}
+
+cmd_doctor() {
+  local rc=0 mo label tun hs route service dns
+  printf 'oneexit %s doctor\n\n' "${ONEEXIT_VERSION}"
+
+  printf 'System\n'
+  boot_volume_is_external || rc=$?
+  case "${rc}" in
+    0) doc_ok "boot volume" "external" ;;
+    1) doc_bad "boot volume" "internal (oneexit is meant for an external SSD)" ;;
+    *) doc_info "boot volume" "unknown (diskutil info / failed)" ;;
+  esac
+  if command -v sw_vers >/dev/null 2>&1; then
+    doc_info "macOS" "$(sw_vers -productVersion 2>/dev/null || echo unknown)"
+  fi
+  if ! is_root; then
+    doc_info "privileges" "not root: pf and WireGuard checks need sudo"
+  fi
+
+  printf '\nTools\n'
+  local brew_path
+  brew_path="$(command -v brew 2>/dev/null || true)"
+  [ -n "${brew_path}" ] || { [ -x /opt/homebrew/bin/brew ] && brew_path=/opt/homebrew/bin/brew; } || true
+  if [ -n "${brew_path}" ]; then doc_ok "brew" "${brew_path}"; else doc_bad "brew" "missing (https://brew.sh)"; fi
+  doc_tool wg
+  doc_tool wg-quick
+  doc_tool wireguard-go
+
+  printf '\nFiles\n'
+  if load_config; then
+    mo="$(file_mode_owner "${ONEEXIT_CONFIG}")"
+    doc_ok "config" "${ONEEXIT_CONFIG} (mode ${mo% *}, owner ${mo#* })"
+    if is_ipv4 "${VPS_IP}" && is_port "${VPS_PORT}"; then
+      doc_ok "endpoint" "${VPS_IP}:${VPS_PORT}${VPS_HOST:+ (${VPS_HOST})}"
+    else
+      doc_bad "endpoint" "invalid VPS_IP/VPS_PORT in ${ONEEXIT_CONFIG}"
+    fi
+    doc_info "interfaces" "${PHYS_IFACES:-en0}"
+  else
+    doc_bad "config" "${ONEEXIT_CONFIG} missing (run client/setup.sh)"
+  fi
+  if [ -e "${WG_IFACE_CONF}" ]; then
+    mo="$(file_mode_owner "${WG_IFACE_CONF}")"
+    case "${mo}" in
+      "600 root") doc_ok "wg config" "${WG_IFACE_CONF} (mode 600, owner root)" ;;
+      *) doc_bad "wg config" "${WG_IFACE_CONF} has mode ${mo% *}, owner ${mo#* }; expected 600 root" ;;
+    esac
+  else
+    doc_bad "wg config" "${WG_IFACE_CONF} missing"
+  fi
+  if [ -r "${ONEEXIT_ANCHOR_FILE}" ]; then
+    doc_ok "anchor file" "${ONEEXIT_ANCHOR_FILE}"
+  else
+    doc_bad "anchor file" "${ONEEXIT_ANCHOR_FILE} missing"
+  fi
+
+  printf '\nDaemons\n'
+  for label in "${ONEEXIT_FIREWALL_LABEL}" "${ONEEXIT_TUNNEL_LABEL}"; do
+    if daemon_loaded "${label}"; then
+      doc_ok "${label#com.oneexit.}" "${label} loaded"
+    elif [ -e "${ONEEXIT_LAUNCHD_DIR}/${label}.plist" ]; then
+      doc_bad "${label#com.oneexit.}" "${label} installed but not loaded (sudo launchctl bootstrap system ${ONEEXIT_LAUNCHD_DIR}/${label}.plist)"
+    else
+      doc_bad "${label#com.oneexit.}" "${ONEEXIT_LAUNCHD_DIR}/${label}.plist missing"
+    fi
+  done
+
+  printf '\nFirewall\n'
+  case "$(pf_status_word)" in
+    enabled) doc_ok "pf" "enabled" ;;
+    DISABLED) doc_bad "pf" "disabled" ;;
+    *) doc_info "pf" "unknown (needs sudo)" ;;
+  esac
+  case "$(anchor_status_word)" in
+    loaded) doc_ok "anchor" "${ONEEXIT_ANCHOR} has rules" ;;
+    EMPTY) doc_bad "anchor" "${ONEEXIT_ANCHOR} is empty" ;;
+    *) doc_info "anchor" "unknown (needs sudo)" ;;
+  esac
+  case "$(hook_status_word)" in
+    present) doc_ok "pf hook" 'main ruleset evaluates anchor "com.apple/*"' ;;
+    MISSING) doc_bad "pf hook" "${PF_HOOK_MISSING_MSG}" ;;
+    *) doc_info "pf hook" "$(hook_status_word)" ;;
+  esac
+  if pf_conf_has_hook; then
+    doc_ok "pf.conf" "${ONEEXIT_PF_CONF} has the com.apple/* hook"
+  else
+    doc_bad "pf.conf" "${ONEEXIT_PF_CONF} lacks 'anchor \"com.apple/*\"' (restore the stock file)"
+  fi
+  doc_info "mode" "$(mode_description)"
+  doc_info "tunnel in pf" "$(tunnel_iface_or_placeholder)"
+
+  printf '\nTunnel\n'
+  tun="$(tunnel_iface || true)"
+  if [ -n "${tun}" ]; then doc_ok "interface" "${tun}"; else doc_bad "interface" "no WireGuard interface (sudo oneexit up)"; fi
+  hs="$(handshake_age)"
+  case "${hs}" in
+    *" s ago")
+      if [ "${hs%% *}" -le 180 ]; then doc_ok "handshake" "${hs}"; else doc_bad "handshake" "${hs} (stale, > 180 s)"; fi
+      ;;
+    unknown*) doc_info "handshake" "${hs}" ;;
+    *) doc_bad "handshake" "${hs}" ;;
+  esac
+  route="$(default_route_iface || true)"
+  doc_info "default route" "${route:-none}"
+
+  printf '\nNetwork services\n'
+  while IFS= read -r service; do
+    [ -n "${service}" ] || continue
+    dns="$(networksetup -getdnsservers "${service}" 2>/dev/null | tr '\n' ' ' || true)"
+    case "${dns}" in
+      *"aren't any"*) dns="from DHCP (not the tunnel resolver)" ;;
+      *) ;;
+    esac
+    doc_info "${service}" "DNS: ${dns}"
+  done <<EOT
+$(network_services)
+EOT
+
+  printf '\n'
+  if [ "${DOCTOR_PROBLEMS}" -eq 0 ]; then
+    log_ok "no problems found"
+  else
+    log_warn "${DOCTOR_PROBLEMS} problem(s) found"
+    return 1
+  fi
+}
+
+# ---------------------------------------------------------------- main
+
+# Most commands need root (pfctl, wg, networksetup). Re-run through sudo
+# unless this is a dry run, or the caller only asked for help.
+# ONEEXIT_NO_SUDO=1 disables this (used by the test suite).
+ensure_root() {
+  local arg
+  is_root && return 0
+  is_dry_run && return 0
+  [ "${ONEEXIT_NO_SUDO:-0}" = "1" ] && return 0
+  for arg in "$@"; do
+    case "${arg}" in
+      -h | --help | --dry-run) return 0 ;;
+      *) ;;
+    esac
+  done
+  exec sudo "${BASH_SOURCE[0]}" "$@"
+}
+
+ORIG_ARGS=("$@")
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --version)
+      printf 'oneexit %s\n' "${ONEEXIT_VERSION}"
+      exit 0
+      ;;
+    -*) usage_error "unknown option: $1" ;;
+    *) break ;;
+  esac
+  shift
+done
+
+if [ "$#" -eq 0 ]; then
+  usage >&2
+  exit 2
+fi
+
+command_name="$1"
+shift
+case "${command_name}" in
+  status | doctor | lock | unlock | portal | up | down | uninstall | leak-test)
+    ensure_root "${ORIG_ARGS[@]}"
+    ;;
+  logs)
+    if [ ! -r "${ONEEXIT_LOG_DIR}/firewall.log" ] && [ -e "${ONEEXIT_LOG_DIR}/firewall.log" ]; then
+      ensure_root "${ORIG_ARGS[@]}"
+    fi
+    ;;
+  *) ;;
+esac
+case "${command_name}" in
+  status) cmd_status "$@" ;;
+  lock) cmd_lock "$@" ;;
+  unlock) cmd_unlock "$@" ;;
+  portal) cmd_portal "$@" ;;
+  up) cmd_up "$@" ;;
+  down) cmd_down "$@" ;;
+  leak-test)
+    if is_dry_run; then set -- --dry-run "$@"; fi
+    cmd_leak_test "$@"
+    ;;
+  doctor) cmd_doctor "$@" ;;
+  logs) cmd_logs "$@" ;;
+  uninstall)
+    if is_dry_run; then set -- --dry-run "$@"; fi
+    cmd_uninstall "$@"
+    ;;
+  version) printf 'oneexit %s\n' "${ONEEXIT_VERSION}" ;;
+  help) usage ;;
+  *)
+    log_error "unknown command: ${command_name}"
+    usage >&2
+    exit 2
+    ;;
+esac

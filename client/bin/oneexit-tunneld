@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# oneexit-tunneld: bring the WireGuard tunnel up and keep it healthy.
+#
+# Started by launchd (com.oneexit.tunnel). Runs "wg-quick up" on the
+# configured wg0.conf, then every few seconds reads the latest handshake.
+# If the handshake is older than 180 s, or the default route moved to another
+# interface (new Wi-Fi, cable plugged in), the tunnel is taken down and up
+# again. While a captive-portal window is open (/var/run/oneexit/portal-until
+# in the future) the tunnel is kept down so the portal page is reachable; it
+# comes back up when the window ends. stdout/stderr go to
+# /var/log/oneexit/tunnel.log.
+set -euo pipefail
+
+_self="${BASH_SOURCE[0]}"
+while [ -h "${_self}" ]; do
+  _dir="$(cd -P "$(dirname "${_self}")" && pwd)"
+  _self="$(readlink "${_self}")"
+  case "${_self}" in /*) ;; *) _self="${_dir}/${_self}" ;; esac
+done
+SELF_DIR="$(cd -P "$(dirname "${_self}")" && pwd)"
+LIB_DIR=""
+for _cand in "${ONEEXIT_LIB_DIR:-}" "${SELF_DIR}/lib" "${SELF_DIR}/../lib" /usr/local/libexec/oneexit/lib; do
+  if [ -n "${_cand}" ] && [ -f "${_cand}/common.sh" ]; then
+    LIB_DIR="${_cand}"
+    break
+  fi
+done
+if [ -z "${LIB_DIR}" ]; then
+  echo "error: cannot find the oneexit libraries (common.sh)" >&2
+  exit 1
+fi
+# shellcheck source=../lib/common.sh
+. "${LIB_DIR}/common.sh"
+# shellcheck source=../lib/pf.sh
+. "${LIB_DIR}/pf.sh"
+
+usage() {
+  cat <<USAGE
+Usage: oneexit-tunneld [--once] [--interval SECONDS] [--dry-run] [--help]
+
+Brings up the WireGuard tunnel (wg-quick) and restarts it when the handshake
+is stale (> ${MAX_HANDSHAKE_AGE} s) or the default route changes interface.
+
+  --once           run one check/repair pass and exit
+  --interval N     seconds between passes (default 10)
+  --dry-run        print the commands instead of running them
+  --help           show this help
+USAGE
+}
+
+INTERVAL=10
+MAX_HANDSHAKE_AGE=180
+ONCE=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --once) ONCE=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    --interval)
+      [ "$#" -ge 2 ] || usage_error "--interval needs a value"
+      is_uint "$2" && [ "$2" -ge 1 ] || usage_error "--interval must be a positive integer"
+      INTERVAL="$2"
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+require_root
+
+WG_NAME="wg0"
+UP_SINCE=0
+LAST_ROUTE_IF=""
+
+tunnel_is_up() {
+  command -v wg >/dev/null 2>&1 || return 1
+  wg show "${WG_NAME}" >/dev/null 2>&1
+}
+
+# latest_handshake: newest handshake epoch over all peers (0 = none yet).
+latest_handshake() {
+  local value
+  value="$(wg show "${WG_NAME}" latest-handshakes 2>/dev/null |
+    awk 'BEGIN { max = 0 } $2 + 0 > max { max = $2 + 0 } END { print max }')" || value=0
+  is_uint "${value}" || value=0
+  printf '%s\n' "${value}"
+}
+
+tunnel_up() {
+  log_ts "wg-quick up ${WG_IFACE_CONF}"
+  if run wg-quick up "${WG_IFACE_CONF}"; then
+    UP_SINCE="$(now_epoch)"
+    LAST_ROUTE_IF="$(default_route_iface || true)"
+  else
+    log_ts "error: wg-quick up failed"
+    UP_SINCE="$(now_epoch)"
+  fi
+}
+
+tunnel_restart() {
+  log_ts "restarting tunnel: $*"
+  run wg-quick down "${WG_IFACE_CONF}" || log_ts "warn: wg-quick down failed"
+  tunnel_up
+}
+
+check_once() {
+  local now hs age route_if
+  load_config || true
+  if [ ! -r "${WG_IFACE_CONF}" ] && ! is_dry_run; then
+    log_ts "error: ${WG_IFACE_CONF} is missing or unreadable"
+    return 1
+  fi
+  if ! command -v wg-quick >/dev/null 2>&1 && ! is_dry_run; then
+    log_ts "error: wg-quick not found (brew install wireguard-tools wireguard-go)"
+    return 1
+  fi
+
+  now="$(now_epoch)"
+  case "$(pf_current_mode "${now}")" in
+    portal\ *)
+      if tunnel_is_up || is_dry_run; then
+        log_ts "captive-portal window open; taking the tunnel down"
+        run wg-quick down "${WG_IFACE_CONF}" || log_ts "warn: wg-quick down failed"
+      fi
+      UP_SINCE=0
+      LAST_ROUTE_IF=""
+      return 0
+      ;;
+    *) ;;
+  esac
+
+  if ! tunnel_is_up; then
+    log_ts "tunnel is down"
+    tunnel_up
+    return 0
+  fi
+
+  [ "${UP_SINCE}" -gt 0 ] || UP_SINCE="${now}"
+  route_if="$(default_route_iface || true)"
+
+  if [ -n "${LAST_ROUTE_IF}" ] && [ -n "${route_if}" ] && [ "${route_if}" != "${LAST_ROUTE_IF}" ]; then
+    tunnel_restart "default route moved ${LAST_ROUTE_IF} -> ${route_if}"
+    return 0
+  fi
+  [ -z "${route_if}" ] || LAST_ROUTE_IF="${route_if}"
+
+  if [ -z "${route_if}" ]; then
+    # No network at all: nothing to gain from restarting.
+    return 0
+  fi
+
+  hs="$(latest_handshake)"
+  if [ "${hs}" -gt 0 ]; then
+    age=$((now - hs))
+    if [ "${age}" -gt "${MAX_HANDSHAKE_AGE}" ] && [ $((now - UP_SINCE)) -gt "${MAX_HANDSHAKE_AGE}" ]; then
+      tunnel_restart "last handshake ${age}s ago"
+    fi
+  elif [ $((now - UP_SINCE)) -gt "${MAX_HANDSHAKE_AGE}" ]; then
+    tunnel_restart "no handshake since $((now - UP_SINCE))s"
+  fi
+  return 0
+}
+
+on_term() {
+  log_ts "stopping; tunnel left as is"
+  exit 0
+}
+trap on_term TERM INT
+
+run mkdir -p "${ONEEXIT_RUN_DIR}" "${ONEEXIT_LOG_DIR}"
+load_config || true
+log_ts "oneexit-tunneld ${ONEEXIT_VERSION} starting (interval ${INTERVAL}s, conf ${WG_IFACE_CONF})"
+
+while :; do
+  check_once || true
+  if [ "${ONCE}" -eq 1 ]; then
+    break
+  fi
+  sleep "${INTERVAL}" &
+  wait "$!" || true
+done

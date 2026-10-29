@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Test stub for wg: no interfaces.
+echo "Unable to access interface: No such file or directory" >&2
+exit 1

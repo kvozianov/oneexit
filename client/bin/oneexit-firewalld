@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# oneexit-firewalld: keep pf enabled and the oneexit anchor loaded.
+#
+# Started by launchd (com.oneexit.firewall) at boot, before login. Every few
+# seconds it checks that pf is enabled and that the anchor com.apple/oneexit
+# has rules, and reloads it if not. The ruleset is re-rendered on every pass
+# from /usr/local/etc/oneexit/config and the live utun device of the tunnel
+# (utun99 placeholder while it is down) and reloaded whenever it differs from
+# the last loaded one in /var/run/oneexit/current.pf, so a changed VPS_IP or a
+# new utun after a wg-quick restart takes effect within seconds.
+# Timers in /var/run/oneexit/{unlock,portal}-until select the unlocked or
+# captive-portal ruleset; when they expire the locked ruleset is loaded again
+# and DNS is pointed back at the tunnel resolver. It also logs an error when
+# the main ruleset lost its "com.apple/*" anchor hook (our anchor would then
+# never be evaluated). stdout/stderr go to /var/log/oneexit/firewall.log.
+set -euo pipefail
+
+_self="${BASH_SOURCE[0]}"
+while [ -h "${_self}" ]; do
+  _dir="$(cd -P "$(dirname "${_self}")" && pwd)"
+  _self="$(readlink "${_self}")"
+  case "${_self}" in /*) ;; *) _self="${_dir}/${_self}" ;; esac
+done
+SELF_DIR="$(cd -P "$(dirname "${_self}")" && pwd)"
+LIB_DIR=""
+for _cand in "${ONEEXIT_LIB_DIR:-}" "${SELF_DIR}/lib" "${SELF_DIR}/../lib" /usr/local/libexec/oneexit/lib; do
+  if [ -n "${_cand}" ] && [ -f "${_cand}/common.sh" ]; then
+    LIB_DIR="${_cand}"
+    break
+  fi
+done
+if [ -z "${LIB_DIR}" ]; then
+  echo "error: cannot find the oneexit libraries (common.sh)" >&2
+  exit 1
+fi
+# shellcheck source=../lib/common.sh
+. "${LIB_DIR}/common.sh"
+# shellcheck source=../lib/pf.sh
+. "${LIB_DIR}/pf.sh"
+
+usage() {
+  cat <<USAGE
+Usage: oneexit-firewalld [--once] [--interval SECONDS] [--dry-run] [--help]
+
+Keeps pf enabled and the ${ONEEXIT_ANCHOR} anchor loaded (watchdog).
+
+  --once           run one check/repair pass and exit
+  --interval N     seconds between passes (default 5)
+  --dry-run        print the commands instead of running them
+  --help           show this help
+USAGE
+}
+
+INTERVAL=5
+ONCE=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --once) ONCE=1 ;;
+    --dry-run) DRY_RUN=1 ;;
+    --interval)
+      [ "$#" -ge 2 ] || usage_error "--interval needs a value"
+      is_uint "$2" && [ "$2" -ge 1 ] || usage_error "--interval must be a positive integer"
+      INTERVAL="$2"
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+require_root
+
+LAST_MODE=""
+LAST_TUN=""
+LAST_HOOK=""
+RESTORE_DNS=0
+TUN_IFACE=""
+
+# expire_timers NOW: remove expired unlock/portal timers. Sets RESTORE_DNS=1
+# when one expired, because both windows hand DNS to DHCP.
+expire_timers() {
+  local now="$1" name until
+  for name in unlock portal; do
+    if until="$(pf_mode_until "${name}")" && [ "${until}" -le "${now}" ]; then
+      log_ts "${name} window expired"
+      run rm -f "${ONEEXIT_RUN_DIR}/${name}-until"
+      RESTORE_DNS=1
+    fi
+  done
+}
+
+restore_tunnel_dns() {
+  log_ts "restoring tunnel DNS ${TUNNEL_DNS}"
+  # shellcheck disable=SC2046 # TUNNEL_DNS may hold several servers
+  set_dns_all $(printf '%s' "${TUNNEL_DNS}" | tr ',' ' ')
+}
+
+check_once() {
+  local now mode_line mode rules current="" reason="" hook_rc=0
+  RESTORE_DNS=0
+  now="$(now_epoch)"
+  expire_timers "${now}"
+  mode_line="$(pf_current_mode "${now}")"
+  mode="${mode_line%% *}"
+
+  if ! load_config && [ "${mode}" != "unlocked" ]; then
+    log_ts "warn: cannot read ${ONEEXIT_CONFIG}; loading the failsafe ruleset"
+    mode="failsafe"
+  fi
+
+  # The utun device changes whenever wg-quick brings the tunnel up again.
+  TUN_IFACE="$(tunnel_iface_or_placeholder)"
+  if [ "${TUN_IFACE}" != "${LAST_TUN}" ]; then
+    log_ts "tunnel interface: ${TUN_IFACE}$([ "${TUN_IFACE}" = "${ONEEXIT_TUN_PLACEHOLDER}" ] && printf ' (placeholder, tunnel down)')"
+    LAST_TUN="${TUN_IFACE}"
+  fi
+
+  if ! rules="$(pf_render_mode "${mode}")"; then
+    log_ts "error: config is invalid (VPS_IP=${VPS_IP} VPS_PORT=${VPS_PORT}); loading the failsafe ruleset"
+    mode="failsafe"
+    rules="$(pf_render_mode failsafe)"
+  fi
+  current="$(pf_current_rules 2>/dev/null || true)"
+
+  if [ "${rules}" != "${current}" ]; then
+    if [ -n "${LAST_MODE}" ] && [ "${mode}" != "${LAST_MODE}" ]; then
+      reason="mode ${LAST_MODE} -> ${mode}"
+    elif [ -z "${current}" ]; then
+      reason="nothing loaded yet"
+    else
+      reason="ruleset changed"
+    fi
+  fi
+
+  if ! pf_enabled; then
+    log_ts "pf is disabled; enabling"
+    pf_enable || log_ts "error: pfctl -E failed"
+    reason="${reason:-pf was disabled}"
+  elif ! pf_anchor_loaded; then
+    reason="${reason:-anchor ${ONEEXIT_ANCHOR} is empty}"
+  fi
+
+  # A window ended without its timer expiring here (oneexit lock, or the
+  # file was removed): DNS still has to go back to the tunnel resolver.
+  case "${LAST_MODE}:${mode}" in
+    portal:locked | portal:failsafe | unlocked:locked | unlocked:failsafe) RESTORE_DNS=1 ;;
+    *) ;;
+  esac
+
+  if [ -n "${reason}" ]; then
+    log_ts "loading ${mode} ruleset (${reason})"
+    if ! pf_apply_mode "${mode}" "${rules}"; then
+      log_ts "error: failed to load the ${mode} ruleset"
+      return 1
+    fi
+  fi
+
+  if [ "${RESTORE_DNS}" -eq 1 ] && [ "${mode}" != "portal" ] && [ "${mode}" != "unlocked" ]; then
+    restore_tunnel_dns
+  fi
+
+  # Our anchor only counts if the main ruleset still calls com.apple/*.
+  pf_main_has_hook || hook_rc=$?
+  if [ "${hook_rc}" -eq 1 ] && [ "${LAST_HOOK}" != "missing" ]; then
+    log_ts "error: ${PF_HOOK_MISSING_MSG}"
+    LAST_HOOK="missing"
+  elif [ "${hook_rc}" -eq 0 ] && [ "${LAST_HOOK}" = "missing" ]; then
+    log_ts "main pf ruleset has the com.apple/* anchor again"
+    LAST_HOOK="ok"
+  fi
+
+  LAST_MODE="${mode}"
+  return 0
+}
+
+on_term() {
+  log_ts "stopping; rules stay loaded"
+  exit 0
+}
+trap on_term TERM INT
+
+run mkdir -p "${ONEEXIT_RUN_DIR}" "${ONEEXIT_LOG_DIR}"
+log_ts "oneexit-firewalld ${ONEEXIT_VERSION} starting (interval ${INTERVAL}s)"
+
+while :; do
+  check_once || true
+  if [ "${ONCE}" -eq 1 ]; then
+    break
+  fi
+  sleep "${INTERVAL}" &
+  wait "$!" || true
+done

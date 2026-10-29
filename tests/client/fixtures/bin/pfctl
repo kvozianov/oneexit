@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Test stub for pfctl. Never touches pf. FAKE_PFCTL selects the behaviour:
+#   denied (default)  every call fails like an unprivileged caller
+#   hook              pf enabled, main ruleset has anchor "com.apple/*"
+#   nohook            pf enabled, main ruleset lost the com.apple/* hook
+mode="${FAKE_PFCTL:-denied}"
+if [ "${mode}" = "denied" ]; then
+  echo "pfctl: /dev/pf: Permission denied" >&2
+  exit 1
+fi
+args=" $* "
+case "${args}" in
+  *" -s info "*) echo "Status: Enabled for 0 days 01:02:03           Debug: Urgent" ;;
+  *" -a "*" -s rules "*) echo "block drop all" ;;
+  *" -s rules "* | *" -sr "*)
+    echo 'scrub-anchor "com.apple/*" all fragment reassemble'
+    if [ "${mode}" = "hook" ]; then
+      echo 'anchor "com.apple/*" all'
+    fi
+    ;;
+  *) ;;
+esac
+exit 0

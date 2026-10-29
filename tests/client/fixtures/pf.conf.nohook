@@ -1,0 +1,4 @@
+# A modified /etc/pf.conf without the com.apple anchor point.
+set skip on lo0
+block in all
+pass out all

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Test stub for launchctl: nothing is loaded.
+case "${1:-}" in
+  print) exit 113 ;;
+  *) exit 0 ;;
+esac
