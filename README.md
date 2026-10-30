@@ -359,6 +359,12 @@ In CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)):
   is up, the nftables ruleset contains the masquerade rule, unbound listens on
   `10.66.0.1:53`, and `peer.sh add` prints a valid client config.
 
+Beyond CI, the client has been run end to end in a macOS virtual machine against a server
+installed by `server/install.sh`: install, traffic through the tunnel with matching
+counters on both ends, leak checks, kill switch and watchdog recovery, portal and unlock
+windows, reboot and uninstall. What was run, what it showed and what is still unverified:
+[docs/verification.md](docs/verification.md).
+
 ## FAQ
 
 Why not the WireGuard app from the App Store, why pf, what happens when the tunnel
