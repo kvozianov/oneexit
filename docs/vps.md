@@ -84,7 +84,7 @@ sudo bash server/install.sh --port 443 --peer travel-mac
 
 ### What install.sh does
 
-1. Installs the packages `wireguard`, `wireguard-tools`, `unbound`, `nftables` and
+1. Installs the packages `wireguard`, `wireguard-tools`, `unbound`, `nftables`, `dnsutils` and
    `qrencode` with the system package manager.
 2. Generates the server key pair: `/etc/wireguard/server.key` and `server.pub`.
 3. Writes `/etc/wireguard/wg0.conf` (mode 0600): interface `wg0`, address `10.66.0.1/24`,

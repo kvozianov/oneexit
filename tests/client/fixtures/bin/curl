@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Test stub for curl. Never touches the network.
+#   public IPv4 services   print FAKE_PUBLIC_IP (default 203.0.113.5);
+#                          FAKE_CURL_IPIFY=down makes api.ipify.org fail
+#   curl -6 api64.ipify.org  FAKE_CURL_IPV6: mapped (default; an IPv4 answer, as
+#                          macOS gives with IPv6 off), v6 (an IPv6 answer), none
+#   curl -6 to an IPv6 literal  fails unless FAKE_CURL_IPV6=literal
+#   --interface ... 1.1.1.1  FAKE_CURL_DIRECT: unreach (default; no route via the
+#                          interface while the tunnel is up), timeout, open
+#   --interface ... the gateway  FAKE_CURL_GW: timeout (default), refused
+v6=0
+iface=""
+url=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -6) v6=1 ;;
+    --interface)
+      iface="$2"
+      shift
+      ;;
+    -m | -o | -w)
+      shift
+      ;;
+    -*) ;;
+    *) url="$1" ;;
+  esac
+  shift
+done
+public_ip="${FAKE_PUBLIC_IP:-203.0.113.5}"
+
+timed_out() {
+  echo "* Connection timed out after 5001 milliseconds" >&2
+  exit 28
+}
+
+if [ -n "${iface}" ]; then
+  case "${url}" in
+    http://1.1.1.1*)
+      case "${FAKE_CURL_DIRECT:-unreach}" in
+        timeout) timed_out ;;
+        open) exit 0 ;;
+        *)
+          echo "* Immediate connect fail for 1.1.1.1: Network is unreachable" >&2
+          exit 7
+          ;;
+      esac
+      ;;
+    *)
+      case "${FAKE_CURL_GW:-timeout}" in
+        refused)
+          echo "* connect to ${url} port 80 from 192.168.1.20 port 50000 failed: Connection refused" >&2
+          exit 7
+          ;;
+        *) timed_out ;;
+      esac
+      ;;
+  esac
+fi
+
+if [ "${v6}" -eq 1 ]; then
+  case "${url}" in
+    *'['*)
+      [ "${FAKE_CURL_IPV6:-mapped}" = "literal" ] && exit 0
+      exit 7
+      ;;
+    *)
+      case "${FAKE_CURL_IPV6:-mapped}" in
+        v6) echo "2001:db8::5" ;;
+        none) exit 7 ;;
+        *) echo "${public_ip}" ;;
+      esac
+      exit 0
+      ;;
+  esac
+fi
+
+case "${url}" in
+  https://api.ipify.org*)
+    [ "${FAKE_CURL_IPIFY:-up}" = "down" ] && exit 6
+    echo "${public_ip}"
+    ;;
+  https://ifconfig.me/ip | https://icanhazip.com*) echo "${public_ip}" ;;
+  *) exit 7 ;;
+esac
+exit 0

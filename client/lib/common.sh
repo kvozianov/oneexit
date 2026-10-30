@@ -3,7 +3,7 @@
 # Sourced by setup.sh, uninstall.sh, the oneexit CLI, the daemons and leak-test.sh.
 # Must stay compatible with the stock macOS bash 3.2.
 
-ONEEXIT_VERSION="0.1.0"
+ONEEXIT_VERSION="0.1.1"
 ONEEXIT_ANCHOR="com.apple/oneexit"
 
 DRY_RUN="${DRY_RUN:-0}"
@@ -28,6 +28,9 @@ ONEEXIT_TUN_PLACEHOLDER="utun99"
 ONEEXIT_FIREWALL_LABEL="com.oneexit.firewall"
 ONEEXIT_TUNNEL_LABEL="com.oneexit.tunnel"
 ONEEXIT_DEFAULT_DNS="10.66.0.1"
+# Asked in order for the public IPv4 (oneexit status, leak test); the first
+# that answers wins, so one blocked or unresolvable service does not matter.
+ONEEXIT_IPV4_SERVICES="https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com"
 
 # sudo and launchd give a bare PATH. Put the Homebrew directories in front
 # (wg-quick needs Homebrew's bash 4+, not /bin/bash 3.2), but leave a directory
@@ -376,6 +379,13 @@ tunnel_iface_or_placeholder() {
 route_default_iface() {
   command -v route >/dev/null 2>&1 || return 1
   route -n get default 2>/dev/null | awk '$1 == "interface:" { print $2; found = 1; exit } END { exit !found }'
+}
+
+# route_default_gateway: "gateway:" of route -n get default (the router on
+# the physical network; on-link, so not covered by the tunnel's 0/1 routes).
+route_default_gateway() {
+  command -v route >/dev/null 2>&1 || return 1
+  route -n get default 2>/dev/null | awk '$1 == "gateway:" { print $2; found = 1; exit } END { exit !found }'
 }
 
 # default_route_iface: interface of the IPv4 default route (ignoring utun).

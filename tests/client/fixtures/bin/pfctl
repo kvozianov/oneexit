@@ -3,7 +3,15 @@
 #   denied (default)  every call fails like an unprivileged caller
 #   hook              pf enabled, main ruleset has anchor "com.apple/*"
 #   nohook            pf enabled, main ruleset lost the com.apple/* hook
+#   noisy             prints macOS's usual chatter to stderr; exits FAKE_PFCTL_RC
 mode="${FAKE_PFCTL:-denied}"
+if [ "${mode}" = "noisy" ]; then
+  printf '%s\n' "No ALTQ support in kernel" "ALTQ related functions disabled" \
+    "pfctl: Use of -f option, could result in flushing of rules" \
+    "present in the main ruleset added by the system at startup." \
+    "See /etc/pf.conf for further details." "" "pfctl: real problem on line 3" >&2
+  exit "${FAKE_PFCTL_RC:-0}"
+fi
 if [ "${mode}" = "denied" ]; then
   echo "pfctl: /dev/pf: Permission denied" >&2
   exit 1

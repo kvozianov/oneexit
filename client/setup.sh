@@ -371,6 +371,11 @@ for label in "${ONEEXIT_FIREWALL_LABEL}" "${ONEEXIT_TUNNEL_LABEL}"; do
   if command -v launchctl >/dev/null 2>&1 && launchctl print "system/${label}" >/dev/null 2>&1; then
     run launchctl bootout "system/${label}" || true
   fi
+  # wireguard-go outlives its daemon (AbandonProcessGroup); on a re-run take
+  # the old tunnel down so the new daemon starts it from the new wg0.conf.
+  if [ "${label}" = "${ONEEXIT_TUNNEL_LABEL}" ] && wg_tunnel_up; then
+    run wg-quick down "${ONEEXIT_WG_CONF}" || log_warn "wg-quick down failed"
+  fi
   run launchctl enable "system/${label}"
   # Right after a bootout launchd can answer "Bootstrap failed: 5"; retry.
   attempt=1

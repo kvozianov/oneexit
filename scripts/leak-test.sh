@@ -27,7 +27,11 @@ fi
 . "${LIB_DIR}/pf.sh"
 
 MAX_HANDSHAKE_AGE=180
-IPV4_SERVICES="https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com"
+IPV4_SERVICES="${ONEEXIT_IPV4_SERVICES}"
+IPV6_HOSTNAME_URL="https://api64.ipify.org"
+# Cloudflare's resolver over IPv6, by address: no DNS involved, no IPv4 fallback.
+IPV6_LITERAL_URL="http://[2606:4700:4700::1111]/"
+DIRECT_URL="http://1.1.1.1"
 WEBRTC_URL="https://browserleaks.com/webrtc"
 
 usage() {
@@ -39,14 +43,19 @@ Checks, each reported as PASS, FAIL, SKIP or INFO:
                  ${ONEEXIT_ANCHOR} has rules (needs root)
   2. handshake   WireGuard handshake younger than ${MAX_HANDSHAKE_AGE} s (needs root)
   3. ipv4        public IPv4 equals VPS_IP from the config (or --expect-ip)
-  4. ipv6        IPv6 connectivity must fail
+  4. ipv6        IPv6 connectivity must fail (an IPv6 answer from api64.ipify.org,
+                 or a connection to an IPv6 address literal, is a FAIL)
   5. dns         the system resolver's public IP (whoami.akamai.net) equals VPS_IP
-  6. direct      a request bound to the physical interface must fail
+                 (or --expect-ip)
+  6. direct      a TCP request bound to the physical interface must be dropped (to
+                 1.1.1.1, or to the on-link default gateway when the tunnel's routes
+                 keep the kernel from routing it out of that interface at all)
   7. bonjour     the anchor contains "block all" (mDNS stays local; needs root)
   8. webrtc      what to check by hand in a browser
 
 Options:
-  --expect-ip IP   expected public IPv4 (default: VPS_IP from ${ONEEXIT_CONFIG})
+  --expect-ip IP   expected public IPv4 of the exit, for the ipv4 and dns checks
+                   (default: VPS_IP from ${ONEEXIT_CONFIG})
   --iface IFACE    physical interface for the direct check (default: the interface of
                    the default route from "route -n get default")
   --json           print the results as a JSON array
@@ -249,10 +258,15 @@ check_ipv4() {
   fi
 }
 
+# With IPv6 turned off, macOS answers "curl -6 HOST" with IPv4-mapped
+# addresses (::ffff:a.b.c.d) and the request travels over IPv4 (through the
+# tunnel). Only an IPv6 answer, or a connection to an IPv6 literal, proves
+# IPv6 connectivity.
 check_ipv6() {
-  local out
+  local out note=""
   if is_dry_run; then
-    show_cmd curl -6 -s -m 5 https://api64.ipify.org
+    show_cmd curl -6 -s -m 5 "${IPV6_HOSTNAME_URL}"
+    show_cmd curl -6 -s -m 5 -o /dev/null "${IPV6_LITERAL_URL}"
     record SKIP ipv6 "dry-run"
     return 0
   fi
@@ -260,15 +274,24 @@ check_ipv6() {
     record SKIP ipv6 "curl not found"
     return 0
   fi
-  if out="$(curl -6 -s -m 5 https://api64.ipify.org 2>/dev/null)"; then
-    record FAIL ipv6 "IPv6 is reachable (public address ${out:-unknown})"
+  out="$(curl -6 -s -m 5 "${IPV6_HOSTNAME_URL}" 2>/dev/null | tr -d '[:space:]')" || out=""
+  case "${out}" in
+    *:*)
+      record FAIL ipv6 "IPv6 is reachable (public address ${out})"
+      return 0
+      ;;
+    '') ;;
+    *) note=" (${IPV6_HOSTNAME_URL#https://} answered ${out} over IPv4 via an IPv4-mapped address, not IPv6)" ;;
+  esac
+  if curl -6 -s -m 5 -o /dev/null "${IPV6_LITERAL_URL}" 2>/dev/null; then
+    record FAIL ipv6 "IPv6 is reachable (${IPV6_LITERAL_URL} answered)"
   else
-    record PASS ipv6 "no IPv6 connectivity"
+    record PASS ipv6 "no IPv6 connectivity${note}"
   fi
 }
 
 check_dns() {
-  local ip expected="${VPS_IP:-${EXPECT_IP:-}}"
+  local ip expected="${EXPECT_IP:-${VPS_IP:-}}"
   if is_dry_run; then
     show_cmd dig +short +time=3 +tries=2 whoami.akamai.net
     record SKIP dns "dry-run"
@@ -313,10 +336,29 @@ direct_iface() {
   printf '%s\n' "${dev:-en0}"
 }
 
+# probe_direct IFACE URL: one TCP request bound to IFACE.
+# 0 it left the Mac (connected, or the remote refused it), 1 it timed out
+# (dropped, as pf does), 2 the kernel did not send it (no route via IFACE).
+probe_direct() {
+  local err rc=0
+  err="$(curl --interface "$1" -v -s -m 5 -o /dev/null "$2" 2>&1)" || rc=$?
+  case "${rc}" in
+    0 | 52 | 55 | 56) return 0 ;;
+    28) return 1 ;;
+    *) ;;
+  esac
+  case "${err}" in
+    *"Connection refused"* | *"Connection reset"*) return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
 check_direct() {
+  local rc=0 gw gw_rc=0
   if is_dry_run; then
     show_cmd route -n get default
-    show_cmd curl --interface "<default-route interface>" -s -m 5 -o /dev/null http://1.1.1.1
+    show_cmd curl --interface "<default-route interface>" -v -s -m 5 -o /dev/null "${DIRECT_URL}"
+    show_cmd curl --interface "<default-route interface>" -v -s -m 5 -o /dev/null "http://<default gateway>/"
     record SKIP direct "dry-run"
     return 0
   fi
@@ -329,11 +371,32 @@ check_direct() {
     record SKIP direct "interface ${IFACE} does not exist"
     return 0
   fi
-  if curl --interface "${IFACE}" -s -m 5 -o /dev/null http://1.1.1.1 2>/dev/null; then
-    record FAIL direct "a request bound to ${IFACE} reached 1.1.1.1 outside the tunnel"
-  else
-    record PASS direct "requests bound to ${IFACE} are blocked"
+  probe_direct "${IFACE}" "${DIRECT_URL}" || rc=$?
+  case "${rc}" in
+    0)
+      record FAIL direct "a request bound to ${IFACE} reached ${DIRECT_URL#http://} outside the tunnel"
+      return 0
+      ;;
+    1)
+      record PASS direct "requests bound to ${IFACE} are dropped"
+      return 0
+      ;;
+    *) ;;
+  esac
+  # While the tunnel is up its 0/1 and 128/1 routes leave no route to
+  # 1.1.1.1 scoped to IFACE, so the kernel refuses before pf sees a packet.
+  # The default gateway is on-link and still reachable through IFACE.
+  gw="$(route_default_gateway || true)"
+  if ! is_ipv4 "${gw}"; then
+    record SKIP direct "${IFACE} has no route to ${DIRECT_URL#http://} and no IPv4 default gateway to probe"
+    return 0
   fi
+  probe_direct "${IFACE}" "http://${gw}/" || gw_rc=$?
+  case "${gw_rc}" in
+    0) record FAIL direct "a TCP request bound to ${IFACE} reached the gateway ${gw} outside the tunnel" ;;
+    1) record PASS direct "requests bound to ${IFACE} are dropped (tested against the gateway ${gw}; ${DIRECT_URL#http://} has no route via ${IFACE} while the tunnel is up)" ;;
+    *) record SKIP direct "the kernel did not send requests bound to ${IFACE} (to ${DIRECT_URL#http://} or the gateway ${gw}); nothing to test" ;;
+  esac
 }
 
 check_bonjour() {
@@ -360,7 +423,7 @@ check_bonjour() {
 }
 
 check_webrtc() {
-  record INFO webrtc "open ${WEBRTC_URL} in each browser: only ${VPS_IP:-your VPS IP} may appear; no LAN, ISP or IPv6 addresses"
+  record INFO webrtc "open ${WEBRTC_URL} in each browser: only ${EXPECT_IP:-${VPS_IP:-your VPS IP}} may appear; no LAN, ISP or IPv6 addresses"
 }
 
 check_pf

@@ -145,3 +145,15 @@ if the server is ready, step 3.
 - **Before you shut down on a network you do not trust,** turn Wi-Fi off. The firewall is
   loaded a few seconds after boot; with Wi-Fi off the next boot does not join a network
   before that happens. See [threat-model.md](threat-model.md).
+
+## Trying oneexit in a virtual machine
+
+`client/setup.sh` refuses to run when macOS is not on an external disk. A macOS virtual
+machine (for example one made with UTM or tart on Apple silicon) looks internal to it:
+`diskutil info /` reports `Device Location: Internal`, `Removable Media: Fixed` and an
+empty `Protocol:` for the virtual disk. In a throwaway VM, run setup with
+`--allow-internal-disk`; `oneexit doctor` then lists the boot volume as its one FAIL.
+
+The kill switch blocks inbound connections too, so an SSH session into the VM stops
+working once setup has run. Use the VM's own window, or the hypervisor's guest agent
+(for example `tart exec`), which does not go through the network.

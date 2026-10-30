@@ -17,6 +17,8 @@
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>AbandonProcessGroup</key>
+  <true/>
   <key>ThrottleInterval</key>
   <integer>5</integer>
   <key>ProcessType</key>

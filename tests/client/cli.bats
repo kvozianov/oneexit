@@ -177,6 +177,77 @@ setup() {
   [ "${output}" = "pf" ]
 }
 
+@test "leak-test ipv6: an IPv4-mapped answer to curl -6 is not IPv6 connectivity" {
+  write_test_config
+  run "${REPO_ROOT}/scripts/leak-test.sh"
+  printf '%s\n' "${output}" | grep -q '^PASS  ipv6 .*IPv4-mapped'
+  FAKE_CURL_IPV6=none run "${REPO_ROOT}/scripts/leak-test.sh"
+  printf '%s\n' "${output}" | grep -q '^PASS  ipv6       no IPv6 connectivity$'
+}
+
+@test "leak-test ipv6: an IPv6 answer or a connection to an IPv6 literal fails" {
+  write_test_config
+  FAKE_CURL_IPV6=v6 run "${REPO_ROOT}/scripts/leak-test.sh"
+  [ "${status}" -eq 1 ]
+  printf '%s\n' "${output}" | grep -q '^FAIL  ipv6 .*2001:db8::5'
+  FAKE_CURL_IPV6=literal run "${REPO_ROOT}/scripts/leak-test.sh"
+  [ "${status}" -eq 1 ]
+  printf '%s\n' "${output}" | grep -q '^FAIL  ipv6 .*2606:4700:4700::1111'
+}
+
+@test "leak-test direct: with the tunnel routes up it probes the on-link gateway" {
+  write_test_config
+  run "${REPO_ROOT}/scripts/leak-test.sh"
+  printf '%s\n' "${output}" | grep -q '^PASS  direct .*gateway 192.168.1.1'
+  FAKE_CURL_GW=refused run "${REPO_ROOT}/scripts/leak-test.sh"
+  [ "${status}" -eq 1 ]
+  printf '%s\n' "${output}" | grep -q '^FAIL  direct .*reached the gateway 192.168.1.1'
+}
+
+@test "leak-test direct: a timeout passes, an answer from 1.1.1.1 fails" {
+  write_test_config
+  FAKE_CURL_DIRECT=timeout run "${REPO_ROOT}/scripts/leak-test.sh"
+  printf '%s\n' "${output}" | grep -q '^PASS  direct     requests bound to en0 are dropped$'
+  FAKE_CURL_DIRECT=open run "${REPO_ROOT}/scripts/leak-test.sh"
+  [ "${status}" -eq 1 ]
+  printf '%s\n' "${output}" | grep -q '^FAIL  direct .*reached 1.1.1.1'
+}
+
+@test "leak-test --expect-ip is the expected exit for both the ipv4 and dns checks" {
+  write_test_config
+  FAKE_PUBLIC_IP=198.51.100.7 run "${REPO_ROOT}/scripts/leak-test.sh"
+  printf '%s\n' "${output}" | grep -q '^FAIL  ipv4 '
+  printf '%s\n' "${output}" | grep -q '^FAIL  dns '
+  FAKE_PUBLIC_IP=198.51.100.7 run "${REPO_ROOT}/scripts/leak-test.sh" --expect-ip 198.51.100.7
+  printf '%s\n' "${output}" | grep -q '^PASS  ipv4 '
+  printf '%s\n' "${output}" | grep -q '^PASS  dns '
+  printf '%s\n' "${output}" | grep -q '^INFO  webrtc .*only 198.51.100.7 may appear'
+}
+
+@test "oneexit status falls back to the next IPv4 service and skips lookups while the tunnel is down" {
+  write_test_config
+  run "${CLIENT_DIR}/oneexit" status
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"public IPv4:  not checked (tunnel down)"* ]]
+  ONEEXIT_WG_RUN_DIR="${FIXTURES}/wireguard" FAKE_CURL_IPIFY=down run "${CLIENT_DIR}/oneexit" status
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"tunnel:       utun3"* ]]
+  [[ "${output}" == *"public IPv4:  203.0.113.5 (your VPS)"* ]]
+}
+
+@test "oneexit down --dry-run stops the daemon and the tunnel" {
+  write_test_config
+  run "${CLIENT_DIR}/oneexit" down --dry-run
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"[dry-run] launchctl bootout system/com.oneexit.tunnel"* ]]
+  [[ "${output}" == *"[dry-run] wg-quick down ${ONEEXIT_WG_CONF}"* ]]
+}
+
+@test "the tunnel daemon leaves wireguard-go running when it stops (AbandonProcessGroup)" {
+  plist="${CLIENT_DIR}/launchd/com.oneexit.tunnel.plist"
+  grep -A1 '<key>AbandonProcessGroup</key>' "${plist}" | grep -q '<true/>'
+}
+
 @test "launchd plists pass plutil -lint and point at libexec" {
   command -v plutil >/dev/null 2>&1 || skip "plutil not available (not macOS)"
   for label in com.oneexit.firewall com.oneexit.tunnel; do

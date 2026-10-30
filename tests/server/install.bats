@@ -37,7 +37,7 @@ setup() {
   run "${INSTALL_SH}" --dry-run --endpoint 203.0.113.5 --peer ci --port 443
   [ "${status}" -eq 0 ]
   [[ "${output}" == *"env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get -o DPkg::Lock::Timeout=600 update -q"* ]]
-  [[ "${output}" == *"env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get -o DPkg::Lock::Timeout=600 install -y -q wireguard wireguard-tools unbound nftables qrencode"* ]]
+  [[ "${output}" == *"env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get -o DPkg::Lock::Timeout=600 install -y -q wireguard wireguard-tools unbound nftables qrencode dnsutils"* ]]
   [[ "${output}" == *"[dry-run] systemctl enable --now wg-quick@wg0"* ]]
   [[ "${output}" == *"[dry-run] systemctl enable unbound"* ]]
   [[ "${output}" == *"$(printf '[dry-run] systemctl daemon-reload\n[dry-run] systemctl enable --now oneexit-nft.service')"* ]]

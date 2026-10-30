@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Test stub for dig: only vpn.example.com resolves.
+# Test stub for dig: vpn.example.com resolves; whoami.akamai.net answers
+# FAKE_WHOAMI (default 198.51.100.7), the resolver's public IP.
 for arg in "$@"; do last="${arg}"; done
 case "${last:-}" in
   vpn.example.com) echo "198.51.100.20" ;;
+  whoami.akamai.net) echo "${FAKE_WHOAMI:-198.51.100.7}" ;;
   *) ;;
 esac
 exit 0

@@ -133,7 +133,7 @@ install_packages() {
     apt-get -o DPkg::Lock::Timeout=600 update -q
   run env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
     apt-get -o DPkg::Lock::Timeout=600 install -y -q \
-    wireguard wireguard-tools unbound nftables qrencode
+    wireguard wireguard-tools unbound nftables qrencode dnsutils
   if ! is_dry_run; then
     require_cmd wg wg-quick nft unbound-checkconf qrencode systemctl sysctl ip
   fi
@@ -333,6 +333,27 @@ first_peer() {
   run qrencode -t ansiutf8 -r "${conf}"
 }
 
+# Resolve one name through unbound on the tunnel address. A failure here is a warning,
+# not an error: the install is complete, but clients would have no DNS until it is fixed.
+dns_self_check() {
+  step "DNS self-check"
+  if is_dry_run; then
+    run dig +time=5 +tries=1 @"${WG_SERVER_IP}" example.com A
+    return 0
+  fi
+  if ! command -v dig >/dev/null 2>&1; then
+    warn "dig not found; skipping the DNS self-check (apt-get install dnsutils)"
+    return 0
+  fi
+  local out
+  if out="$(dig +time=5 +tries=1 +short @"${WG_SERVER_IP}" example.com A 2>&1)" && [[ -n "${out}" ]]; then
+    ok "unbound on ${WG_SERVER_IP} resolves example.com (${out%%$'\n'*})"
+  else
+    warn "unbound on ${WG_SERVER_IP} did not resolve example.com: ${out:-no answer}"
+    warn "check: systemctl status unbound; journalctl -u unbound -n 20; unbound-checkconf"
+  fi
+}
+
 summary() {
   step "Done"
   cat >&2 <<SUMMARY
@@ -369,6 +390,7 @@ main() {
   setup_unbound
   start_services
   first_peer
+  dns_self_check
   summary
 }
 

@@ -133,21 +133,37 @@ pf_conf_has_hook() {
   return 1
 }
 
+# pfctl_quiet ARGS...: pfctl without the lines macOS prints on every call
+# ("No ALTQ support in kernel", the "-f could flush rules added by the
+# system" notice). Anything else pfctl says still goes to stderr, and its exit
+# status is kept. In dry-run it prints the plain pfctl command.
+PFCTL_NOISE_RE='^(No ALTQ support in kernel|ALTQ related functions disabled|pfctl: Use of -f option, could result in flushing of rules|present in the main ruleset added by the system at startup\.|See /etc/pf\.conf for further details\.|[[:space:]]*)$'
+pfctl_quiet() {
+  local out rc=0
+  if is_dry_run; then
+    run pfctl "$@"
+    return 0
+  fi
+  out="$(pfctl "$@" 2>&1)" || rc=$?
+  printf '%s\n' "${out}" | grep -Ev "${PFCTL_NOISE_RE}" >&2 || true
+  return "${rc}"
+}
+
 # pf_repair_main_ruleset: reload the stock /etc/pf.conf (never edited) so the
 # "com.apple/*" hook is back; the caller reloads our anchor afterwards.
-pf_repair_main_ruleset() { run pfctl -f "${ONEEXIT_PF_CONF}"; }
+pf_repair_main_ruleset() { pfctl_quiet -f "${ONEEXIT_PF_CONF}"; }
 
 # shellcheck disable=SC2034 # used by the scripts that source this file
 PF_HOOK_MISSING_MSG='main pf ruleset has no "com.apple/*" anchor; the kill switch is not active'
 
 # pf_enable: enable pf (takes a reference; harmless if already enabled).
-pf_enable() { run pfctl -E; }
+pf_enable() { pfctl_quiet -E; }
 
 # pf_load_ruleset FILE: load FILE into the oneexit anchor.
-pf_load_ruleset() { run pfctl -a "${ONEEXIT_ANCHOR}" -f "$1"; }
+pf_load_ruleset() { pfctl_quiet -a "${ONEEXIT_ANCHOR}" -f "$1"; }
 
 # pf_flush_anchor: remove every rule from the oneexit anchor.
-pf_flush_anchor() { run pfctl -a "${ONEEXIT_ANCHOR}" -F all; }
+pf_flush_anchor() { pfctl_quiet -a "${ONEEXIT_ANCHOR}" -F all; }
 
 # ---------------------------------------------------------------- lock modes
 

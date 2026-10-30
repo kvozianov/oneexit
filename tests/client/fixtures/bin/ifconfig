@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Test stub for ifconfig: en* and utun* exist, nothing is listed.
+case "${1:-}" in
+  '') exit 0 ;;
+  en[0-9]* | utun[0-9]*) printf '%s: flags=8863<UP> mtu 1500\n' "$1" ;;
+  *)
+    echo "ifconfig: interface $1 does not exist" >&2
+    exit 1
+    ;;
+esac

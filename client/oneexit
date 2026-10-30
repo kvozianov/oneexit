@@ -146,9 +146,18 @@ mode_description() {
   esac
 }
 
+# public_ipv4: the first answer from ONEEXIT_IPV4_SERVICES (5 s each).
 public_ipv4() {
+  local url ip
   command -v curl >/dev/null 2>&1 || return 1
-  curl -4 -s -m 5 https://api.ipify.org 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+  for url in ${ONEEXIT_IPV4_SERVICES}; do
+    ip="$(curl -4 -s -m 5 "${url}" 2>/dev/null | tr -d '[:space:]')" || ip=""
+    if is_ipv4 "${ip}"; then
+      printf '%s\n' "${ip}"
+      return 0
+    fi
+  done
+  return 1
 }
 
 # parse_minutes DEFAULT ARGS...: sets MINUTES, handles --minutes/--dry-run.
@@ -214,9 +223,16 @@ cmd_status() {
   tun="$(wg_dev || true)"
   printf '  tunnel:       %s\n' "${tun:-down}"
   printf '  handshake:    %s\n' "$(handshake_age)"
-  local ip
-  ip="$(public_ipv4 || true)"
-  if [ -z "${ip}" ]; then
+  local ip="" mode
+  mode="$(pf_current_mode)"
+  # With the tunnel down only an unlock window lets anything out; skip the
+  # lookups (and their timeouts) otherwise.
+  if [ -n "${tun}" ] || [ "${mode%% *}" = "unlocked" ]; then
+    ip="$(public_ipv4 || true)"
+  fi
+  if [ -z "${ip}" ] && [ -z "${tun}" ] && [ "${mode%% *}" != "unlocked" ]; then
+    printf '  public IPv4:  not checked (tunnel down)\n'
+  elif [ -z "${ip}" ]; then
     printf '  public IPv4:  unreachable\n'
   elif [ -n "${VPS_IP}" ] && [ "${ip}" = "${VPS_IP}" ]; then
     printf '  public IPv4:  %s (your VPS)\n' "${ip}"
@@ -311,7 +327,12 @@ cmd_down() {
   if daemon_loaded "${ONEEXIT_TUNNEL_LABEL}" || is_dry_run; then
     run launchctl bootout "system/${ONEEXIT_TUNNEL_LABEL}" || true
   fi
-  run wg-quick down "${WG_IFACE_CONF}" || log_warn "wg-quick down failed (tunnel already down?)"
+  # wireguard-go outlives the daemon (AbandonProcessGroup), so stop it here.
+  if wg_tunnel_up || is_dry_run; then
+    run wg-quick down "${WG_IFACE_CONF}" || log_warn "wg-quick down failed"
+  else
+    log_ok "tunnel was already down"
+  fi
   log_ok "tunnel stopped. The kill switch stays on, so nothing reaches the internet"
   log_info "until 'sudo oneexit up' (or the next reboot)."
 }

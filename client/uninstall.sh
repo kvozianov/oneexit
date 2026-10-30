@@ -94,7 +94,7 @@ pf_before="$(state_value PF_WAS_ENABLED || echo unknown)"
 case "${pf_before}" in
   no)
     log_info "    pf was disabled before setup; disabling it again"
-    run pfctl -d || log_warn "pfctl -d failed"
+    pfctl_quiet -d || log_warn "pfctl -d failed"
     ;;
   yes) log_info "    pf was enabled before setup; leaving it enabled" ;;
   *) log_info "    no record of the pf state before setup; leaving pf enabled (the anchor is empty)" ;;

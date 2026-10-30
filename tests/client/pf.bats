@@ -151,3 +151,12 @@ pass in quick on utun3 proto icmp all keep state"
   run pf_current_mode 2000000
   [ "${output}" = "locked" ]
 }
+
+@test "pfctl_quiet drops macOS's ALTQ and -f chatter, keeps real messages and the exit status" {
+  FAKE_PFCTL=noisy run pfctl_quiet -a com.apple/oneexit -f /dev/null
+  [ "${status}" -eq 0 ]
+  [ "${output}" = "pfctl: real problem on line 3" ]
+  FAKE_PFCTL=noisy FAKE_PFCTL_RC=1 run pf_load_ruleset /dev/null
+  [ "${status}" -eq 1 ]
+  [[ "${output}" != *"ALTQ"* ]]
+}

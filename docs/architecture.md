@@ -84,11 +84,14 @@ tests/
 - Files: `/etc/wireguard/wg0.conf` (0600), `/etc/wireguard/server.key`, `server.pub`,
   `/etc/wireguard/peers/<name>.conf` (client config, 0600), `/etc/wireguard/peers/<name>.pub`.
 - `install.sh [--port N] [--endpoint HOST_OR_IP] [--peer NAME] [--dry-run]`:
-  packages (`wireguard wireguard-tools unbound nftables qrencode`), keys, `wg0.conf`,
+  packages (`wireguard wireguard-tools unbound nftables qrencode dnsutils`), keys, `wg0.conf`,
   `net.ipv4.ip_forward=1` via `/etc/sysctl.d/99-oneexit.conf`, nftables NAT masquerade
   from `10.66.0.0/24` out of the default interface plus `input` accept for `udp dport <port>`,
   unbound listening on `10.66.0.1` port 53 for `10.66.0.0/24` only (recursive, no forwarders,
-  DNSSEC on, `qname-minimisation: yes`), `systemctl enable --now wg-quick@wg0 unbound nftables`.
+  DNSSEC on, `qname-minimisation: yes`). The nftables rules live in `/etc/nftables.d/oneexit.nft`
+  and are loaded by an own oneshot unit `oneexit-nft.service` (the stock `nftables.service` and
+  `/etc/nftables.conf` are left alone, so their `flush ruleset` never runs at boot);
+  `systemctl enable --now wg-quick@wg0 unbound oneexit-nft`.
   Creates the first peer (`--peer`, default `mac`) and prints its config and a QR code.
   Idempotent: re-running keeps existing keys and peers.
 - `peer.sh add NAME` prints the client config to stdout and saves it; `peer.sh qr NAME`;
@@ -156,7 +159,8 @@ pass in quick on utun3 proto icmp all keep state
   `setup.sh` refuses to install when the hook is missing; `oneexit-firewalld`, `oneexit doctor`,
   `oneexit status` and the leak test report its absence as a failure.
 - Anchor: `/etc/pf.conf` is never edited. `oneexit-firewalld` runs `pfctl -E`,
-  `pfctl -a com.apple/oneexit -f /etc/pf.anchors/com.oneexit`, and every 5 s checks
+  `pfctl -a com.apple/oneexit -f /etc/pf.anchors/com.oneexit` (through `pfctl_quiet`, which drops
+  the "No ALTQ support" / "-f could flush rules" lines macOS prints on every call), and every 5 s checks
   `pfctl -s info` (Enabled), `pfctl -a com.apple/oneexit -s rules` (non-empty) and the live
   tunnel interface name; reloads if anything differs from what it last loaded.
   `/var/run/oneexit/portal-until` or `unlock-until` (epoch seconds) switch which ruleset is loaded;
@@ -174,8 +178,14 @@ pass in quick on utun3 proto icmp all keep state
   `/var/run/wireguard/utunN.sock` exists; `wg show wg0` does not work on macOS because wireguard-go's
   socket is named after the utun device, and only wg-quick translates the name);
   if the handshake is older than 180 s or the default route interface changed, `wg-quick down` + `up`.
+  The tunnel plist sets `AbandonProcessGroup`: wireguard-go and wg-quick's route monitor run in the
+  daemon's process group, and launchd would otherwise kill them whenever the daemon stops
+  (`launchctl bootout`, `kickstart -k`, a crash). So the tunnel outlives a restart of its watchdog;
+  `oneexit down`, `uninstall.sh` and a re-run of `setup.sh` take it down explicitly with `wg-quick down`.
 - CLI `oneexit`:
-  `status` (pf enabled, anchor loaded, lock state, handshake age, external IP via tunnel),
+  `status` (pf enabled, anchor loaded, lock state, handshake age, external IP via tunnel: the first
+  answer from `https://api.ipify.org`, `https://ifconfig.me/ip`, `https://icanhazip.com`, not
+  looked up while the tunnel is down outside an unlock window),
   `lock`, `unlock [--minutes N]` (default 10), `portal [--minutes N]` (default 3),
   `up`, `down`, `leak-test` (runs `scripts/leak-test.sh`), `doctor`, `logs`, `uninstall`, `version`.
   Every subcommand supports `--dry-run` where it changes state. Subcommands that need root
@@ -205,11 +215,22 @@ Checks, each printed as `PASS`/`FAIL`/`SKIP` with a one-line reason; exit 1 if a
 2. WireGuard handshake younger than 180 s.
 3. Public IPv4 (first of `https://api.ipify.org`, `https://ifconfig.me/ip`, `https://icanhazip.com`,
    10 s timeout) equals `VPS_IP` or, if `--expect-ip X`, equals X. Without either, print it as INFO.
-4. IPv6 connectivity must fail (`curl -6 -m 5 https://api64.ipify.org` → FAIL if it succeeds).
+4. IPv6 connectivity must fail: FAIL if `curl -6 -m 5 https://api64.ipify.org` answers with an
+   IPv6 address, or if `curl -6 -m 5 http://[2606:4700:4700::1111]/` (an address literal, no DNS)
+   connects. A plain success of `curl -6 HOST` proves nothing: with IPv6 turned off macOS hands
+   `curl -6` IPv4-mapped addresses (`::ffff:a.b.c.d`) and the request goes out over IPv4, through
+   the tunnel, answering with the IPv4 exit address.
 5. DNS resolver: `dig +short TXT whoami.cloudflare @1.1.1.1` is NOT used (would leak). Instead
    `dig +short whoami.akamai.net` through the system resolver returns the resolver's public IP;
-   PASS if it equals `VPS_IP`; SKIP if `dig` is missing.
-6. Direct interface: `curl --interface en0 -m 5 http://1.1.1.1` must fail.
+   PASS if it equals `VPS_IP` (or `--expect-ip X`, the same expected exit as check 3); SKIP if
+   `dig` is missing.
+6. Direct interface: a TCP request bound to the default-route interface
+   (`curl --interface en0 -m 5 http://1.1.1.1`) must time out (pf drops it). While the tunnel is
+   up its `0/1` and `128/1` routes leave no route to 1.1.1.1 scoped to `en0`, so the kernel fails
+   the request with "Network is unreachable" before pf sees it; the check then repeats the
+   request against the on-link default gateway (`route -n get default`), which `en0` can still
+   reach: a timeout is a PASS, a connection or a "Connection refused" (the packet left the Mac) is
+   a FAIL.
 7. Bonjour: `pfctl -a com.apple/oneexit -s rules` contains `block all` (sanity).
 8. WebRTC: INFO line with a URL to check manually and what to look for.
 

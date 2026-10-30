@@ -28,7 +28,8 @@ client_test_env() {
   export ONEEXIT_NEWSYSLOG_CONF="${t}/newsyslog.d/oneexit.conf"
   export ONEEXIT_NO_SUDO=1
   mkdir -p "${ONEEXIT_ETC_DIR}" "${ONEEXIT_RUN_DIR}" "${ONEEXIT_WG_RUN_DIR}"
-  unset DRY_RUN FAKE_DISK FAKE_NO_PORTS FAKE_PFCTL TUN_IFACE
+  unset DRY_RUN FAKE_DISK FAKE_NO_PORTS FAKE_PFCTL FAKE_PFCTL_RC TUN_IFACE \
+    FAKE_PUBLIC_IP FAKE_CURL_IPIFY FAKE_CURL_IPV6 FAKE_CURL_DIRECT FAKE_CURL_GW FAKE_WHOAMI
 }
 
 # write_test_config [VPS_IP] [PHYS_IFACES]: a config as setup.sh would write it.
