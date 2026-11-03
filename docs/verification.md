@@ -8,7 +8,7 @@ runs themselves, not estimates.
 | Job | Runner | What it proves |
 |---|---|---|
 | shellcheck 0.11 + `bash -n` | ubuntu | every script parses and is lint-clean |
-| bats | ubuntu and macos | 175 unit tests: config rendering, pf rule text, parsers, dry runs of every installer with stubbed system tools |
+| bats | ubuntu and macos | 178 unit tests: config rendering, pf rule text, parsers, dry runs of every installer with stubbed system tools |
 | macOS dry run + pf syntax | macos | `client/setup.sh --dry-run`, `oneexit init --dry-run`, `pfctl -nvf` on the locked, portal and unlocked rulesets, `plutil -lint` on the launchd plists, CLI smoke |
 | server install | ubuntu | `server/install.sh` runs for real as root; `tests/server/integration.sh` then asserts `wg show`, the nftables tables, unbound on `10.66.0.1:53`, the systemd units, peer add / list / revoke and an idempotent second run (43 checks) |
 
@@ -67,12 +67,38 @@ Lab-only: the container's outbound UDP was blocked by the container runtime duri
 run, so the installer's DNS self-check warned (as designed, warning only) and unbound's
 recursion could not be re-checked; it was checked on 2026-10-30.
 
+## Bootstrap and hardening on a GitHub macOS runner (2026-11-03)
+
+A manual workflow ([.github/workflows/macos-real.yml](../.github/workflows/macos-real.yml),
+`workflow_dispatch` only) runs on a GitHub-hosted `macos-15` runner (macOS 15.8.2,
+arm64, passwordless sudo, no tunnel). Final run: 124 PASS, 0 FAIL, 15 INFO over 139 checks.
+
+| Check | Result |
+|---|---|
+| README one-liner (`install.sh` from `bash -c`) | pass: tarball of the pinned release downloaded, SHA-256 verified, unpacked to `/usr/local/share/oneexit/<version>` (root:wheel), `/usr/local/bin/oneexit` symlink chain resolves, `oneexit version` prints the pinned version |
+| `harden --timezone Europe/Berlin --region DE` | pass: `/etc/localtime` → `Europe/Berlin`, `date +%Z` CET, automatic time zone 1 → 0, Location Services 1 → 0 at the path privacy.sh writes and as read with `defaults -currentHost`, as CoreLocation reports it and as locationd logged at its restart; ComputerName / HostName / LocalHostName → `Mac`; `AppleLocale` en_US → en_DE, `AppleLanguages` en-US → en; WebRTC policy written for Chrome, Brave, Edge, Chromium; Firefox `policies.json` written; Lookup and Safari suggestions off; state file mode 0600 root; `status` shows `privacy: hardened` |
+| Leak test checks 9-12 | pass (time zone, Location Services, computer name, region), read from `--json`; checks 1-8 fail as expected without a tunnel |
+| `unharden` | pass: every value back to the baseline, including settings that were absent before (absent again); state file removed; `status` shows `off` |
+| Idempotence | pass: a second `harden` reads the zone and region from the config, a third prints "keeping" and leaves the state file byte-identical, a second `unharden` restores the baseline again, `unharden` with nothing to do exits 0 |
+
+Bug found by this run and fixed in v0.2.2: the runner's zone was UTC (`/etc/localtime` →
+`zoneinfo/UTC`), `systemsetup -gettimezone` reported it as `GMT`, so `harden` recorded
+`GMT` and `unharden` moved the Mac to the GMT zone; `systemsetup -settimezone UTC` is
+refused outright. The recorded zone now comes from the `/etc/localtime` link, and a zone
+that `systemsetup` refuses but the zone database has is set by linking `/etc/localtime`
+and posting `com.apple.system.timezone`.
+
+Runner-specific, documented in the workflow: SIP is off there, so the locationd restart
+and the write into the Firefox bundle were not tested under SIP; Location Services ship
+off on the runner and are turned on first; the config file that `setup.sh` would write is
+created with placeholder server values so that `harden` stores the zone and region.
+
 ## Not yet verified
 
-- `oneexit init` steps 4-6 and `oneexit harden` on a running macOS (v0.2.0): both have
-  unit tests with stubbed `ssh`, `defaults`, `systemsetup` and `scutil`, and
-  `init --dry-run` runs in CI on macOS, but the client half of `init` and the hardening
-  have not been run for real in the virtual machine yet.
+- `oneexit init` steps 4-6 (client setup, hardening, leak test as one flow) against a
+  reachable server: the hardening and the bootstrap have run for real on a macOS runner,
+  the server half of `init` against a container, but the whole flow has not been run in
+  one piece, and `setup.sh` has not been run on macOS since the v0.1.1 VM run.
 
 - A physical Mac booted from an external SSD (Apple silicon or Intel): boot timing on real
   hardware, Wi-Fi association, sleep and wake, a real captive portal.
