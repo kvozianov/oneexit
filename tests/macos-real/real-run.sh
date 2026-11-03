@@ -525,7 +525,8 @@ phase_idempotence() {
 probe_timezone_names() {
   local tz out
   for tz in UTC GMT; do
-    out="$(sudo systemsetup -settimezone "${tz}" 2>&1 | grep -v 'Error:-99' | tr '\n' ' ')"
+    out="$(sudo systemsetup -settimezone "${tz}" 2>&1 || echo "(exit $?)")"
+    out="$(printf '%s\n' "${out}" | grep -v 'Error:-99' | tr '\n' ' ' || true)"
     record probe "systemsetup -settimezone ${tz}" INFO "${out}-> link $(readlink /etc/localtime), get: $(timezone_now), date +%Z: $(date +%Z)" "-"
   done
 }
