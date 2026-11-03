@@ -481,14 +481,16 @@ phase_unharden() {
 }
 
 phase_idempotence() {
-  local rc key
+  local rc key base_zone
   # Second harden: no options, so TIMEZONE and REGION come from the config
   # that the first harden wrote.
   rc="$(run_cli harden-2.log harden)"
   expect_eq idempotence "harden (from config) exit code" "${rc}" 0
   sudo cat "${STATE}" >"${OUT}/privacy-state-2.txt" 2>/dev/null || true
   # The state file of this round records the baseline again, not hardened values.
-  expect_eq idempotence "state TIMEZONE" "$(sed -n 's/^TIMEZONE=//p' "${OUT}/privacy-state-2.txt")" "$(value baseline TIMEZONE)"
+  # (the zone /etc/localtime named; systemsetup calls UTC "GMT").
+  base_zone="$(value baseline LOCALTIME)"
+  expect_eq idempotence "state TIMEZONE" "$(sed -n 's/^TIMEZONE=//p' "${OUT}/privacy-state-2.txt")" "${base_zone##*zoneinfo/}"
   expect_eq idempotence "state COMPUTER_NAME" "$(sed -n 's/^COMPUTER_NAME=//p' "${OUT}/privacy-state-2.txt")" "$(sed -n 's/^COMPUTER_NAME=//p' "${OUT}/privacy-state-1.txt")"
   # Third harden on top of a hardened Mac: the state file must not change.
   rc="$(run_cli harden-3.log harden --timezone "${TZ_WANT}" --region "${REGION_WANT}")"
