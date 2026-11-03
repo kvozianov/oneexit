@@ -99,9 +99,15 @@ pinned_copy() {
 }
 
 @test "install.sh --dry-run works from bash -c (as in the README one-liner)" {
-  run /bin/bash -c "$(cat "${INSTALL}")" install.sh --dry-run
+  # The version the script pins (its checksum is pinned only after the tag
+  # exists, so a dry run here passes one explicitly).
+  local version
+  version="$(sed -n 's/^ONEEXIT_VERSION="\([^"]*\)"$/\1/p' "${INSTALL}")"
+  [ -n "${version}" ]
+  run /bin/bash -c "$(cat "${INSTALL}")" install.sh --dry-run \
+    --sha256 0000000000000000000000000000000000000000000000000000000000000000
   [ "${status}" -eq 0 ]
-  [[ "${output}" == *"ln -sfn /usr/local/share/oneexit/0.2.0/client/oneexit /usr/local/bin/oneexit"* ]]
+  [[ "${output}" == *"ln -sfn /usr/local/share/oneexit/${version}/client/oneexit /usr/local/bin/oneexit"* ]]
 }
 
 @test "release-checksum.sh --dry-run prints the tag tarball URL; VERSION is required" {
