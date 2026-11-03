@@ -10,7 +10,7 @@ setup() {
 @test "oneexit --help lists every subcommand" {
   run "${CLIENT_DIR}/oneexit" --help
   [ "${status}" -eq 0 ]
-  for cmd in status lock unlock portal up down leak-test doctor logs uninstall version; do
+  for cmd in status lock unlock portal up down harden unharden leak-test doctor logs uninstall version; do
     printf '%s\n' "${output}" | grep -Eq "^  ${cmd}( |$)" || {
       echo "missing: ${cmd}"
       return 1
@@ -167,12 +167,14 @@ setup() {
   [[ "${output}" == *"[dry-run] dig +short"*"whoami.akamai.net"* ]]
   [[ "${output}" == *"[dry-run] pfctl -s rules"* ]]
   [[ "${output}" == *"[dry-run] route -n get default"* ]]
-  [ "$(printf '%s\n' "${output}" | grep -Ec '^(PASS|FAIL|SKIP|INFO) ')" -eq 8 ]
+  [[ "${output}" == *"[dry-run] systemsetup -gettimezone"* ]]
+  [[ "${output}" == *"[dry-run] scutil --get LocalHostName"* ]]
+  [ "$(printf '%s\n' "${output}" | grep -Ec '^(PASS|FAIL|SKIP|INFO) ')" -eq 12 ]
 }
 
-@test "leak-test.sh --dry-run --json prints a valid JSON array of 8 checks" {
+@test "leak-test.sh --dry-run --json prints a valid JSON array of 12 checks" {
   command -v python3 >/dev/null 2>&1 || skip "python3 not installed"
-  run bash -c '"$1" --dry-run --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); assert len(d)==8, d; print(d[0][\"check\"])"' _ "${REPO_ROOT}/scripts/leak-test.sh"
+  run bash -c '"$1" --dry-run --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); assert len(d)==12, d; print(d[0][\"check\"])"' _ "${REPO_ROOT}/scripts/leak-test.sh"
   [ "${status}" -eq 0 ]
   [ "${output}" = "pf" ]
 }

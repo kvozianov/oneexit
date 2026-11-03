@@ -133,8 +133,8 @@ After setup, also consider:
   suggestions that send queries to Apple.
 - Use a separate browser profile for this system, with no synced account.
 
-Now continue with step 2 of the [README](../README.md#install-in-5-steps) (the VPS) or,
-if the server is ready, step 3.
+Now continue with the [Install](../README.md#install) section of the README: rent the
+VPS ([docs/vps.md](vps.md)), then run the two install commands on this macOS.
 
 ## Going back to the internal disk
 

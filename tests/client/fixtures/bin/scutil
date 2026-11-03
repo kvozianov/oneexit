@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Test stub for scutil: "--get NAME" answers FAKE_COMPUTER_NAME (default
+# "Test User's MacBook Pro"), FAKE_HOST_NAME (default: not set) and
+# FAKE_LOCAL_HOST_NAME (default Testers-MacBook-Pro); set to "" for "not set".
+# --set changes nothing.
+default_computer_name="Test User's MacBook Pro"
+if [ "${1:-}" = "--get" ]; then
+  case "${2:-}" in
+    ComputerName) value="${FAKE_COMPUTER_NAME-${default_computer_name}}" ;;
+    HostName) value="${FAKE_HOST_NAME:-}" ;;
+    LocalHostName) value="${FAKE_LOCAL_HOST_NAME-Testers-MacBook-Pro}" ;;
+    *) value="" ;;
+  esac
+  if [ -z "${value}" ]; then
+    echo "${2:-}: not set" >&2
+    exit 1
+  fi
+  printf '%s\n' "${value}"
+fi
+exit 0

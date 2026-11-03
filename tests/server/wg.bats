@@ -57,6 +57,15 @@ CONF
   [ "${output}" = "${expected}" ]
 }
 
+@test "render_peer_conf with a time zone adds only the leading comment line" {
+  run render_peer_conf PEER_PRIV 10.66.0.2 SERVER_PUB 203.0.113.5 51820 Europe/Berlin
+  [ "${status}" -eq 0 ]
+  without="$(render_peer_conf PEER_PRIV 10.66.0.2 SERVER_PUB 203.0.113.5 51820)"
+  [ "${output}" = "$(printf '# oneexit-timezone = Europe/Berlin\n%s' "${without}")" ]
+  run render_peer_conf PEER_PRIV 10.66.0.2 SERVER_PUB 203.0.113.5 51820 ""
+  [ "${output}" = "${without}" ]
+}
+
 @test "next_peer_ip returns the lowest free address (.2 and .4 taken -> .3)" {
   run next_peer_ip "${SERVER_FIXTURES}/wg0-two-peers.conf"
   [ "${status}" -eq 0 ]

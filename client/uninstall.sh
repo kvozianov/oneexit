@@ -25,12 +25,16 @@ fi
 . "${LIB_DIR}/common.sh"
 # shellcheck source=lib/pf.sh
 . "${LIB_DIR}/pf.sh"
+# shellcheck source=lib/privacy.sh
+. "${LIB_DIR}/privacy.sh"
 
 usage() {
   cat <<USAGE
-Usage: sudo client/uninstall.sh [--keep-keys] [--dry-run] [--help]
+Usage: sudo client/uninstall.sh [--keep-keys] [--keep-privacy] [--dry-run] [--help]
 
 Removes oneexit from this Mac:
+  * restores the settings changed by "oneexit harden" (Location Services, time
+    zone, locale, computer names, browser WebRTC policies), if it ran
   * stops and removes the launchd daemons ${ONEEXIT_FIREWALL_LABEL} and ${ONEEXIT_TUNNEL_LABEL}
   * brings the WireGuard tunnel down
   * flushes the pf anchor ${ONEEXIT_ANCHOR}; disables pf only if it was off before setup
@@ -38,18 +42,21 @@ Removes oneexit from this Mac:
   * removes the installed files
 
 Options:
-  --keep-keys   keep ${ONEEXIT_WG_CONF} (the WireGuard private key)
-  --dry-run     print every command instead of running it
-  --help        show this help
+  --keep-keys      keep ${ONEEXIT_WG_CONF} (the WireGuard private key)
+  --keep-privacy   leave the hardened privacy settings as they are
+  --dry-run        print every command instead of running it
+  --help           show this help
 
 Homebrew packages (wireguard-tools, wireguard-go) are left installed.
 USAGE
 }
 
 KEEP_KEYS=0
+KEEP_PRIVACY=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --keep-keys) KEEP_KEYS=1 ;;
+    --keep-privacy) KEEP_PRIVACY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -h | --help)
       usage
@@ -68,6 +75,18 @@ require_root
 load_config || true
 if is_dry_run; then
   log_info "Dry run: nothing will be changed."
+fi
+
+if [ -e "${ONEEXIT_PRIVACY_STATE}" ]; then
+  if [ "${KEEP_PRIVACY}" -eq 1 ]; then
+    log_step "Keeping the privacy settings (--keep-privacy)"
+    log_info "    The values from before oneexit harden were (${ONEEXIT_PRIVACY_STATE} is removed below):"
+    grep -v '^#' "${ONEEXIT_PRIVACY_STATE}" | sed 's/^/      /' || true
+  else
+    log_step "Restoring the settings changed by oneexit harden"
+    unharden_apply ||
+      log_warn "some privacy settings were not restored; the values from before are listed in ${ONEEXIT_PRIVACY_STATE} until it is removed below"
+  fi
 fi
 
 log_step "Stopping launchd daemons"
@@ -115,6 +134,7 @@ log_step "Removing installed files"
 run rm -f "${ONEEXIT_NEWSYSLOG_CONF}"
 run rm -f "${ONEEXIT_BIN}"
 run rm -rf "${ONEEXIT_LIBEXEC}" "${ONEEXIT_RUN_DIR}" "${ONEEXIT_LOG_DIR}"
+run rm -rf "${ONEEXIT_SHARE_DIR:-/usr/local/share/oneexit}"
 run rm -rf "${ONEEXIT_ETC_DIR}"
 if [ "${KEEP_KEYS}" -eq 1 ]; then
   log_info "    keeping ${WG_IFACE_CONF} (--keep-keys)"

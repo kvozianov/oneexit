@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Test stub for tar: records the call in FAKE_CALL_LOG (if set), then runs
+# the real tar, so tests can assert that a dry run never archived anything.
+if [ -n "${FAKE_CALL_LOG:-}" ]; then
+  printf 'tar %s\n' "$*" >>"${FAKE_CALL_LOG}"
+fi
+for real in /usr/bin/tar /bin/tar; do
+  [ -x "${real}" ] && exec "${real}" "$@"
+done
+echo "tar stub: no real tar found" >&2
+exit 1

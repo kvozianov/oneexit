@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Test stub for ssh. No test may reach a real server: every call is recorded
+# in FAKE_CALL_LOG (if set) and fails loudly with ssh's own error code.
+if [ -n "${FAKE_CALL_LOG:-}" ]; then
+  printf 'ssh %s\n' "$*" >>"${FAKE_CALL_LOG}"
+fi
+echo "ssh stub: unexpected ssh call (tests never contact a server): ssh $*" >&2
+exit 255

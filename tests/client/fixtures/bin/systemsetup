@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Test stub for systemsetup: never changes the clock or the time zone.
+#   -gettimezone      prints FAKE_TIMEZONE (default Asia/Almaty)
+#   -settimezone TZ   prints what macOS prints; changes nothing
+case "${1:-}" in
+  -gettimezone) echo "Time Zone: ${FAKE_TIMEZONE:-Asia/Almaty}" ;;
+  -settimezone) echo "Set TimeZone: ${2:-}" ;;
+  *) ;;
+esac
+exit 0

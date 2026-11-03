@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Test stub for defaults: never touches preferences. "defaults read DOMAIN KEY"
+# answers from environment variables; unset means the key does not exist.
+#   locationd LocationServicesEnabled   FAKE_LOCATION
+#   com.apple.timezone.auto Active      FAKE_TZ_AUTO
+#   -g AppleLocale                      FAKE_APPLE_LOCALE
+#   -g AppleLanguages                   FAKE_APPLE_LANGUAGES (";"-separated)
+#   <browser bundle> WebRtcIPHandlingPolicy  FAKE_WEBRTC
+#   com.apple.lookup.shared LookupSuggestionsDisabled  FAKE_LOOKUP
+#   com.apple.Safari UniversalSearchEnabled            FAKE_SAFARI
+# write and delete succeed and change nothing.
+[ "${1:-}" = "read" ] || exit 0
+domain="${2:-}"
+key="${3:-}"
+value=""
+case "${domain} ${key}" in
+  *com.apple.locationd" LocationServicesEnabled") value="${FAKE_LOCATION:-}" ;;
+  *com.apple.timezone.auto" Active") value="${FAKE_TZ_AUTO:-}" ;;
+  "-g AppleLocale" | "NSGlobalDomain AppleLocale") value="${FAKE_APPLE_LOCALE:-}" ;;
+  "-g AppleLanguages" | "NSGlobalDomain AppleLanguages")
+    if [ -n "${FAKE_APPLE_LANGUAGES:-}" ]; then
+      echo "("
+      printf '%s\n' "${FAKE_APPLE_LANGUAGES}" | tr ';' '\n' | sed -e 's/^/    "/' -e 's/$/",/' -e '$ s/,$//'
+      echo ")"
+      exit 0
+    fi
+    ;;
+  *" WebRtcIPHandlingPolicy") value="${FAKE_WEBRTC:-}" ;;
+  "com.apple.lookup.shared LookupSuggestionsDisabled") value="${FAKE_LOOKUP:-}" ;;
+  "com.apple.Safari UniversalSearchEnabled") value="${FAKE_SAFARI:-}" ;;
+  *) ;;
+esac
+if [ -z "${value}" ]; then
+  echo "The domain/default pair of (${domain}, ${key}) does not exist" >&2
+  exit 1
+fi
+printf '%s\n' "${value}"

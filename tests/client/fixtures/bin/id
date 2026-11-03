@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Test stub for id. "id -u" is FAKE_UID if set (0 pretends to be root), else
+# the real uid; "id -un" is FAKE_ID_USER (default tester); "id -F [USER]" is
+# FAKE_ID_FULLNAME (default Test User). Everything else goes to the real id.
+case "$*" in
+  -u)
+    if [ -n "${FAKE_UID:-}" ]; then
+      echo "${FAKE_UID}"
+      exit 0
+    fi
+    ;;
+  -un | "-u -n" | -nu) echo "${FAKE_ID_USER:-tester}"; exit 0 ;;
+  -F | "-F "*) echo "${FAKE_ID_FULLNAME:-Test User}"; exit 0 ;;
+  *) ;;
+esac
+for real in /usr/bin/id /bin/id; do
+  [ -x "${real}" ] && exec "${real}" "$@"
+done
+exit 1

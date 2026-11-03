@@ -4,6 +4,13 @@ oneexit's only exit is a small Linux server that you rent. This page covers choo
 one, installing the server side, getting the client config to your Mac, adding more
 devices, and the maintenance the installer leaves to you.
 
+Most users only need the first three sections (choose, create, first login) and then run
+`sudo oneexit init --server root@YOUR_VPS` on the Mac: it uploads `server/`, runs
+`install.sh` over ssh and fetches the client config by itself (see the
+[README](../README.md#install)). The [Install](#install) and
+[Getting the config to the Mac](#getting-the-config-to-the-mac) sections below are the
+manual path, and describe what `init` does on the server.
+
 ## Choosing a provider
 
 oneexit does not recommend a provider. Any of the large European hosting companies
@@ -56,7 +63,10 @@ Minimal images may lack `curl` or `git`: `apt -y install curl git`.
 
 ## Install
 
-Clone the repository, read the installer (it is plain bash), try the dry run, then install:
+The manual path; `oneexit init` on the Mac runs the same `install.sh` for you (from
+`/opt/oneexit/server/` on the server, with `--endpoint`, `--port`, `--peer` and
+`--timezone` filled in). By hand: clone the repository, read the installer (it is plain
+bash), try the dry run, then install:
 
 ```bash
 git clone https://github.com/kvozianov/oneexit.git
@@ -73,14 +83,22 @@ If you are logged in as root and `sudo` is not installed (common on Debian), dro
 sudo bash server/install.sh --port 443 --peer travel-mac
 ```
 
-`install.sh [--port N] [--endpoint HOST_OR_IP] [--peer NAME] [--dry-run]`
+`install.sh [--port N] [--endpoint HOST_OR_IP] [--peer NAME] [--timezone TZ] [--no-dns-blocklist] [--dry-run]`
 
 | Option | Default | Meaning |
 |---|---|---|
 | `--port N` | `51820` | UDP port WireGuard listens on |
 | `--endpoint HOST_OR_IP` | | Address written into client configs: the server's public IPv4, or a DNS name that points to it |
 | `--peer NAME` | `mac` | Name of the first client |
+| `--timezone TZ` | the server's own time zone, else `Etc/UTC` | Time zone written into every client config, e.g. `Europe/Berlin`; checked against `/usr/share/zoneinfo` |
+| `--no-dns-blocklist` | | Do not answer NXDOMAIN for `gs-loc.apple.com` (see below) |
 | `--dry-run` | | Print every command and every file, change nothing |
+
+The server reports its time zone because the Mac adopts it: the time zone that apps and
+browsers see then matches the exit country instead of the place you really are. It is
+stored as `TIMEZONE=` in `/etc/wireguard/oneexit.env` and written by `peer.sh` as the
+first line of every client config, `# oneexit-timezone = Europe/Berlin` (wg-quick ignores
+comment lines).
 
 ### What install.sh does
 
@@ -95,7 +113,9 @@ sudo bash server/install.sh --port 443 --peer travel-mac
    interface, and an `input` accept rule for the WireGuard UDP port.
 6. Configures `unbound` to listen on `10.66.0.1` port 53 and answer only
    `10.66.0.0/24`, as a recursive resolver with no forwarders, DNSSEC validation on and
-   `qname-minimisation: yes`.
+   `qname-minimisation: yes`. It answers NXDOMAIN for `gs-loc.apple.com`, Apple's Wi-Fi
+   positioning endpoint, as defence in depth next to turning Location Services off on
+   the Mac; Maps and Find My use other hosts. `--no-dns-blocklist` leaves this out.
 7. Runs `systemctl enable --now wg-quick@wg0 unbound nftables`.
 8. Creates the first peer (default name `mac`, address `10.66.0.2`), saves its config
    as `/etc/wireguard/peers/mac.conf` (mode 0600), and prints the config and a QR code.
@@ -105,6 +125,7 @@ Re-running `install.sh` is safe: it keeps the existing keys and peers.
 The client config looks like this:
 
 ```
+# oneexit-timezone = <time zone>
 [Interface]
 PrivateKey = <peer private key>
 Address = 10.66.0.2/32
@@ -123,8 +144,12 @@ There is no IPv6 in it on purpose; see the [FAQ](faq.md#why-no-ipv6).
 
 The config contains the peer's private key. Treat it like a password.
 
-**Copy the file (recommended for a Mac).** Before running `client/setup.sh`, the Mac
-still has normal network access. From the Mac, booted from the SSD:
+`oneexit init --server` fetches it over ssh into a private temporary file and removes
+that file when it is done; this section is for the manual path.
+
+**Copy the file (recommended for a Mac).** Before running `oneexit init --config` or
+`client/setup.sh`, the Mac still has normal network access. From the Mac, booted from
+the SSD:
 
 ```bash
 scp root@YOUR_VPS_IP:/etc/wireguard/peers/mac.conf ./mac.conf

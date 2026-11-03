@@ -12,7 +12,8 @@ source "${SCRIPT_DIR}/lib/templates.sh"
 
 usage() {
   cat <<'USAGE'
-Usage: install.sh [--port N] [--endpoint HOST_OR_IP] [--peer NAME] [--dry-run]
+Usage: install.sh [--port N] [--endpoint HOST_OR_IP] [--peer NAME]
+                  [--timezone TZ] [--no-dns-blocklist] [--dry-run]
 
 Turn a fresh Debian 12+ / Ubuntu 22.04+ VPS into the single exit of a oneexit
 Mac: WireGuard on wg0 (10.66.0.1/24), NAT to the internet, and a recursive
@@ -23,6 +24,11 @@ Options:
                           restrictive networks)
   --endpoint HOST_OR_IP   address clients connect to (default: detected public IP)
   --peer NAME             name of the first peer (default: mac)
+  --timezone TZ           time zone reported to clients in every peer config,
+                          e.g. Europe/Berlin (default: the server's own zone,
+                          else Etc/UTC); the Mac adopts it
+  --no-dns-blocklist      do not answer NXDOMAIN for Apple's Wi-Fi positioning
+                          endpoint (gs-loc.apple.com)
   --dry-run               print every command and file instead of changing anything
   -h, --help              show this help
 
@@ -42,6 +48,8 @@ PORT="51820"
 PORT_SET=0
 ENDPOINT=""
 PEER="mac"
+TIMEZONE=""
+DNS_BLOCKLIST="yes"
 
 WG_DIR="$(root_path /etc/wireguard)"
 WG_CONF="${WG_DIR}/wg0.conf"
@@ -94,6 +102,13 @@ parse_args() {
         shift
         ;;
       --peer=*) PEER="${1#*=}" ;;
+      --timezone)
+        (($# >= 2)) || usage_error "--timezone needs a value"
+        TIMEZONE="$2"
+        shift
+        ;;
+      --timezone=*) TIMEZONE="${1#*=}" ;;
+      --no-dns-blocklist) DNS_BLOCKLIST="no" ;;
       --dns-only-tunnel) ;; # implied: DNS always goes to 10.66.0.1 through the tunnel
       --dry-run) DRY_RUN=1 ;;
       -h | --help)
@@ -109,6 +124,9 @@ parse_args() {
     usage_error "invalid --endpoint: ${ENDPOINT} (hostname or IPv4 address)"
   fi
   valid_peer_name "${PEER}" || usage_error "invalid --peer: ${PEER} (letters, digits, '-', '_'; max 32)"
+  if [[ -n "${TIMEZONE}" ]] && ! valid_timezone "${TIMEZONE}"; then
+    usage_error "invalid --timezone: ${TIMEZONE} (a name from $(zoneinfo_dir), e.g. Europe/Berlin)"
+  fi
 }
 
 check_system() {
@@ -171,6 +189,19 @@ resolve_settings() {
     warn "endpoint changed from ${STATE_ENDPOINT} to ${ENDPOINT}; existing client configs still use the old one"
   fi
   ok "endpoint ${ENDPOINT}:${PORT}/udp, outgoing interface ${IFACE}"
+
+  # Time zone reported to clients: --timezone, else the one recorded by an
+  # earlier run, else the server's own zone.
+  if [[ -n "${TIMEZONE}" ]]; then
+    if [[ -n "${STATE_TIMEZONE}" && "${STATE_TIMEZONE}" != "${TIMEZONE}" ]]; then
+      warn "time zone changed from ${STATE_TIMEZONE} to ${TIMEZONE}; existing client configs still carry the old one"
+    fi
+  elif [[ -n "${STATE_TIMEZONE}" ]] && valid_timezone "${STATE_TIMEZONE}"; then
+    TIMEZONE="${STATE_TIMEZONE}"
+  else
+    TIMEZONE="$(detect_timezone)"
+  fi
+  ok "time zone ${TIMEZONE} (reported to clients)"
 }
 
 setup_keys() {
@@ -215,7 +246,8 @@ setup_wireguard() {
     render_server_conf "${PORT}" "${SERVER_PRIVKEY}" | write_file "${WG_CONF}" 0600
     WG_CONF_NEW=1
   fi
-  printf 'ENDPOINT=%s\nPORT=%s\n' "${ENDPOINT}" "${PORT}" | write_file "${STATE_FILE}" 0600
+  printf 'ENDPOINT=%s\nPORT=%s\nTIMEZONE=%s\n' "${ENDPOINT}" "${PORT}" "${TIMEZONE}" |
+    write_file "${STATE_FILE}" 0600
 }
 
 setup_sysctl() {
@@ -292,7 +324,7 @@ setup_unbound() {
   if distro_sets_trust_anchor; then
     anchor="no"
   fi
-  render_unbound_conf "${anchor}" | write_file "${UNBOUND_FILE}" 0644
+  render_unbound_conf "${anchor}" "${DNS_BLOCKLIST}" | write_file "${UNBOUND_FILE}" 0644
   # unbound-checkconf fails while the trust anchor file does not exist yet;
   # the unbound service creates it on start (unbound-anchor).
   if is_dry_run || [[ -e /var/lib/unbound/root.key ]]; then
@@ -327,7 +359,8 @@ first_peer() {
     warn "peer ${PEER} is in ${WG_CONF} but ${conf} is missing; run: peer.sh revoke ${PEER} && peer.sh add ${PEER}"
     return 0
   else
-    "${SCRIPT_DIR}/peer.sh" add "${PEER}" --endpoint "${ENDPOINT}" --port "${PORT}" ${dry[@]+"${dry[@]}"}
+    "${SCRIPT_DIR}/peer.sh" add "${PEER}" --endpoint "${ENDPOINT}" --port "${PORT}" \
+      --timezone "${TIMEZONE}" ${dry[@]+"${dry[@]}"}
   fi
   printf '\n'
   run qrencode -t ansiutf8 -r "${conf}"
@@ -355,12 +388,17 @@ dns_self_check() {
 }
 
 summary() {
+  local blocklist="NXDOMAIN for gs-loc.apple.com"
+  if [[ "${DNS_BLOCKLIST}" == "no" ]]; then
+    blocklist="no blocklist"
+  fi
   step "Done"
   cat >&2 <<SUMMARY
 
   Endpoint      ${ENDPOINT}:${PORT}/udp
   Tunnel        wg0 ${WG_SERVER_IP}/24, NAT out of ${IFACE}
-  DNS           unbound on ${WG_SERVER_IP}:53 (reachable through the tunnel only)
+  DNS           unbound on ${WG_SERVER_IP}:53 (reachable through the tunnel only; ${blocklist})
+  Time zone     ${TIMEZONE} (written into every peer config; the Mac adopts it)
   First peer    ${PEERS_DIR}/${PEER}.conf
 
 Next steps:

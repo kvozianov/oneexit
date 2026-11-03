@@ -195,19 +195,66 @@ valid_endpoint() {
   [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]
 }
 
-# read_state FILE: load ENDPOINT and PORT from a KEY=value file without
-# sourcing it. Sets STATE_ENDPOINT and STATE_PORT (empty when absent).
+# read_state FILE: load ENDPOINT, PORT and TIMEZONE from a KEY=value file
+# without sourcing it. Sets STATE_ENDPOINT, STATE_PORT and STATE_TIMEZONE
+# (empty when absent).
 # shellcheck disable=SC2034  # read by the calling script
 read_state() {
   local file="$1" key value
   STATE_ENDPOINT=""
   STATE_PORT=""
+  STATE_TIMEZONE=""
   [[ -r "${file}" ]] || return 0
   while IFS='=' read -r key value; do
     value="${value//\"/}"
     case "${key}" in
       ENDPOINT) STATE_ENDPOINT="${value}" ;;
       PORT) STATE_PORT="${value}" ;;
+      TIMEZONE) STATE_TIMEZONE="${value}" ;;
     esac
   done <"${file}"
+}
+
+# Directory of the tz database used to validate time zone names
+# (ONEEXIT_ZONEINFO overrides it in tests).
+zoneinfo_dir() { printf '%s\n' "${ONEEXIT_ZONEINFO:-/usr/share/zoneinfo}"; }
+
+# valid_timezone_name TZ: an IANA-style name such as Europe/Berlin, Etc/UTC
+# or UTC (letters, digits, '_', '+', '-', separated by '/'; no '.' parts).
+valid_timezone_name() {
+  [[ "$1" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ ]] && ((${#1} <= 64))
+}
+
+# valid_timezone TZ: a well-formed name that exists in the tz database. When
+# the database directory is missing, the name is only checked for form.
+valid_timezone() {
+  local dir
+  valid_timezone_name "$1" || return 1
+  dir="$(zoneinfo_dir)"
+  [[ -d "${dir}" ]] || return 0
+  [[ -f "${dir}/$1" ]]
+}
+
+# detect_timezone: the server's current time zone, from
+# `timedatectl show -p Timezone --value`, else ${ONEEXIT_ROOT}/etc/timezone,
+# else Etc/UTC. A detected name that fails valid_timezone is replaced by
+# Etc/UTC with a warning.
+detect_timezone() {
+  local tz="" file
+  if command -v timedatectl >/dev/null 2>&1; then
+    tz="$(timedatectl show -p Timezone --value 2>/dev/null)" || tz=""
+    tz="${tz//[[:space:]]/}"
+  fi
+  file="$(root_path /etc/timezone)"
+  if [[ -z "${tz}" && -r "${file}" ]]; then
+    tz="$(head -n 1 "${file}")"
+    tz="${tz//[[:space:]]/}"
+  fi
+  if [[ -z "${tz}" ]]; then
+    tz="Etc/UTC"
+  elif ! valid_timezone "${tz}"; then
+    warn "detected time zone '${tz}' is not in $(zoneinfo_dir); using Etc/UTC"
+    tz="Etc/UTC"
+  fi
+  printf '%s\n' "${tz}"
 }

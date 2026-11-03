@@ -20,7 +20,11 @@ machine only (CI). Exit 0 if every check passes, 1 on the first failure.
 USAGE
 }
 
-pass() { printf 'PASS: %s\n' "$*"; }
+CHECKS=0
+pass() {
+  CHECKS=$((CHECKS + 1))
+  printf 'PASS %d: %s\n' "${CHECKS}" "$*"
+}
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
   exit 1
@@ -82,6 +86,9 @@ pass "install.sh --endpoint ${ENDPOINT} --peer ci"
 
 grep -q '^\[Interface\]$' "${LOG_DIR}/install.log" || fail "install.sh did not print the peer config"
 pass "install.sh printed the peer config"
+grep -q '^# oneexit-timezone = ' "${LOG_DIR}/install.log" || fail "install.sh did not print the time zone comment"
+pass "install.sh printed the time zone comment"
+check "oneexit.env records TIMEZONE=" grep -q '^TIMEZONE=.' /etc/wireguard/oneexit.env
 
 check "wg show wg0" wg show wg0
 check "wg0 listens on ${PORT}" test "$(wg show wg0 listen-port)" = "${PORT}"
@@ -160,6 +167,15 @@ if command -v dig >/dev/null 2>&1; then
   fi
 fi
 
+# Answered locally by unbound (local-zone), so it needs no network.
+gs_loc_nxdomain() {
+  local full short
+  full="$(dig +time=5 +tries=2 -b 10.66.0.1 @10.66.0.1 gs-loc.apple.com A 2>&1)" || return 1
+  short="$(dig +short +time=5 +tries=2 -b 10.66.0.1 @10.66.0.1 gs-loc.apple.com A 2>&1)" || return 1
+  grep -q 'status: NXDOMAIN' <<<"${full}" && [[ -z "${short}" ]]
+}
+check "unbound answers NXDOMAIN for gs-loc.apple.com" gs_loc_nxdomain
+
 check "first peer config saved with mode 600" test "$(stat -c '%a' /etc/wireguard/peers/ci.conf)" = "600"
 check "wg0.conf has mode 600" test "$(stat -c '%a' /etc/wireguard/wg0.conf)" = "600"
 
@@ -167,6 +183,7 @@ check "wg0.conf has mode 600" test "$(stat -c '%a' /etc/wireguard/wg0.conf)" = "
 out="$("${SERVER_DIR}/peer.sh" add laptop 2>"${LOG_DIR}/peer-add.err")" ||
   fail "peer.sh add laptop exited non-zero: $(cat "${LOG_DIR}/peer-add.err")"
 check "peer.sh add laptop prints [Interface]" grep -qx '\[Interface\]' <<<"${out}"
+check "peer.sh add laptop starts with # oneexit-timezone =" grep -q '^# oneexit-timezone = ' <<<"$(head -n 1 <<<"${out}")"
 check "peer.sh add laptop prints Endpoint = ${ENDPOINT}:${PORT}" grep -qx "Endpoint = ${ENDPOINT}:${PORT}" <<<"${out}"
 check "peer.sh add laptop allocates 10.66.0.3" grep -qx 'Address = 10.66.0.3/32' <<<"${out}"
 check "wg0 has two live peers" test "$(wg show wg0 peers | wc -l)" -eq 2
@@ -196,4 +213,4 @@ check "re-running install.sh adds no peers" test "$(wg show wg0 peers | wc -l)" 
 check "re-running install.sh leaves /etc/nftables.conf alone" no_nftables_conf_include
 check "oneexit-nft.service is still active" systemctl is-active --quiet oneexit-nft.service
 
-printf '\nAll server integration checks passed.\n'
+printf '\nAll %d server integration checks passed.\n' "${CHECKS}"

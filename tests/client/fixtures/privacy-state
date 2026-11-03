@@ -1,0 +1,19 @@
+# Written by oneexit harden before it changed anything; read by oneexit unharden.
+# An empty value means the setting was not set; unharden removes it again.
+HARDEN_EPOCH=1793600000
+USER=tester
+LOCATION_SERVICES=1
+TZ_AUTO=
+TIMEZONE=Asia/Almaty
+APPLE_LOCALE=ru_KZ
+APPLE_LANGUAGES=ru-KZ;en-US
+COMPUTER_NAME=Test User's MacBook Pro
+HOST_NAME=
+LOCAL_HOST_NAME=Testers-MacBook-Pro
+CHROME_WEBRTC_com.google.Chrome=absent
+CHROME_WEBRTC_com.brave.Browser=present:default_public_interface_only
+CHROME_WEBRTC_com.microsoft.Edge=present:disable_non_proxied_udp
+CHROME_WEBRTC_org.chromium.Chromium=absent
+FIREFOX_POLICY_CREATED=yes
+LOOKUP_SUGGESTIONS=0
+SAFARI_UNIVERSAL_SEARCH=

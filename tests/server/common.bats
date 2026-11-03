@@ -57,3 +57,26 @@ setup() {
   run require_root
   [ "${status}" -eq 0 ]
 }
+
+@test "valid_timezone checks the form and the tz database; read_state reads TIMEZONE" {
+  export ONEEXIT_ZONEINFO="${BATS_TEST_TMPDIR}/zoneinfo"
+  mkdir -p "${ONEEXIT_ZONEINFO}/Europe" "${ONEEXIT_ZONEINFO}/Etc"
+  : >"${ONEEXIT_ZONEINFO}/Europe/Berlin"
+  : >"${ONEEXIT_ZONEINFO}/Etc/GMT+3"
+  # A bare "! cmd" does not fail a bats test; a function returning the negation does.
+  rejected() { ! valid_timezone "$1"; }
+  valid_timezone Europe/Berlin
+  valid_timezone Etc/GMT+3
+  rejected Mars/Olympus
+  rejected Europe
+  rejected ../Europe/Berlin
+  rejected ""
+  export ONEEXIT_ZONEINFO="${BATS_TEST_TMPDIR}/missing"
+  valid_timezone Mars/Olympus
+  rejected 'Europe/Ber lin'
+  printf 'ENDPOINT=vpn.example.org\nPORT=443\nTIMEZONE=Europe/Berlin\n' >"${BATS_TEST_TMPDIR}/state"
+  read_state "${BATS_TEST_TMPDIR}/state"
+  [ "${STATE_TIMEZONE}" = "Europe/Berlin" ]
+  read_state "${BATS_TEST_TMPDIR}/none"
+  [ -z "${STATE_TIMEZONE}" ]
+}

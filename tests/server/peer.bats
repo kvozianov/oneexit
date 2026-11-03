@@ -88,3 +88,21 @@ CONF
   [ "${status}" -eq 0 ]
   [ "${output}" = "[dry-run] qrencode -t ansiutf8 -r ${ONEEXIT_ROOT}/etc/wireguard/peers/mac.conf" ]
 }
+
+@test "peer.sh add starts the config with the time zone comment when oneexit.env has TIMEZONE" {
+  install_wg_fixture wg0-two-peers.conf
+  printf 'TIMEZONE=Europe/Berlin\n' >>"${ONEEXIT_ROOT}/etc/wireguard/oneexit.env"
+  run --separate-stderr "${PEER_SH}" add laptop --dry-run
+  [ "${status}" -eq 0 ]
+  [ "$(last_lines "${output}" 11 | head -n 2)" = "$(printf '# oneexit-timezone = Europe/Berlin\n[Interface]')" ]
+  [[ "${output}" == *"$(printf '(mode 0600):\n# oneexit-timezone = Europe/Berlin\n[Interface]')"* ]]
+  # --timezone overrides the state file.
+  run --separate-stderr "${PEER_SH}" add laptop --dry-run --timezone Asia/Tokyo
+  [ "$(last_lines "${output}" 11 | head -n 1)" = "# oneexit-timezone = Asia/Tokyo" ]
+  # Without TIMEZONE in oneexit.env there is no comment line.
+  install_wg_fixture wg0-two-peers.conf
+  run --separate-stderr "${PEER_SH}" add laptop --dry-run
+  [ "${status}" -eq 0 ]
+  [[ "${output}" != *"oneexit-timezone"* ]]
+  [ "$(last_lines "${output}" 10 | head -n 1)" = "[Interface]" ]
+}

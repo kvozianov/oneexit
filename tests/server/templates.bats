@@ -51,6 +51,18 @@ setup() {
   [[ "${output}" != *"auto-trust-anchor-file:"* ]]
 }
 
+@test "unbound template answers NXDOMAIN for gs-loc.apple.com unless the blocklist is off" {
+  run render_unbound_conf
+  [ "$(printf '%s\n' "${output}" | grep -c '^    local-zone: "gs-loc.apple.com." always_nxdomain$')" -eq 1 ]
+  [[ "${output}" == *"Wi-Fi positioning"* ]]
+  run render_unbound_conf no yes
+  [[ "${output}" == *'local-zone: "gs-loc.apple.com." always_nxdomain'* ]]
+  run render_unbound_conf yes no
+  [[ "${output}" != *"local-zone"* ]]
+  [[ "${output}" != *"gs-loc"* ]]
+  [[ "${output}" == *'auto-trust-anchor-file: "/var/lib/unbound/root.key"'* ]]
+}
+
 @test "sysctl template enables IPv4 forwarding" {
   run render_sysctl_conf
   [ "${status}" -eq 0 ]

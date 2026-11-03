@@ -3,7 +3,7 @@
 # Sourced by setup.sh, uninstall.sh, the oneexit CLI, the daemons and leak-test.sh.
 # Must stay compatible with the stock macOS bash 3.2.
 
-ONEEXIT_VERSION="0.1.1"
+ONEEXIT_VERSION="0.2.0"
 ONEEXIT_ANCHOR="com.apple/oneexit"
 
 DRY_RUN="${DRY_RUN:-0}"

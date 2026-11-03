@@ -54,6 +54,43 @@ Each leak class is closed by a specific mechanism, and most of them are checked 
 The kill switch fails closed: if the server is unreachable, the network blocks
 WireGuard, or the tunnel daemon crashes, the Mac is offline, not exposed.
 
+## Location, time zone and names
+
+The tunnel changes where the Mac's traffic comes from. It does not change what macOS
+itself knows and tells about where the Mac is and whose it is. `oneexit harden` closes
+the main channels; `setup.sh` runs it at the end unless `--no-harden` is given. These
+changes apply to the macOS on the external SSD only.
+
+| Channel | What leaks | What harden changes | Checked by |
+|---|---|---|---|
+| Location Services | `locationd` locates the Mac from the Wi-Fi networks around it: it collects the hardware addresses of nearby access points and looks them up in Apple's database, which works the same through the tunnel, because the access points, not the IP address, give the position away. Apps with location permission, and Apple, then know where you are | Location Services off, system-wide. The server's resolver also answers NXDOMAIN for Apple's Wi-Fi positioning host `gs-loc.apple.com`, as defence in depth only: macOS caches positioning data and other services use other hosts | 10 |
+| Automatic time zone | Follows Location Services. Every app and every website (through JavaScript) can read the time zone, and a zone that does not match the exit country stands out | Automatic time zone off; time zone set to the exit country's (`--timezone`, by default the server's own zone from the peer config, else `Europe/Berlin`) | 9 |
+| Region in the locale | `AppleLocale` such as `ru_KZ` names a country, and so do language entries such as `ru-KZ`, which browsers send to every site in `Accept-Language` | The region is replaced (`ru_KZ` becomes `ru_DE`); language entries lose a different region (`ru-KZ` becomes `ru`). The language itself stays | 12 |
+| Computer name | The DHCP client sends the host name to every network the Mac joins (pf has to let DHCP through). The default name contains the owner's first name | `ComputerName`, `HostName` and `LocalHostName` set to `Mac` | 11 |
+| WebRTC | Browsers can offer the Mac's LAN address to websites as a WebRTC candidate | `WebRtcIPHandlingPolicy = disable_non_proxied_udp` for Chrome, Brave, Edge and Chromium; a Firefox policy with `media.peerconnection.ice.default_address_only` if Firefox is installed | 8 (by hand) |
+| Search suggestions | Lookup and Safari suggestions send what you type, with location hints, to Apple | Both turned off | |
+
+**Deliberately not changed:**
+
+- **Your Apple ID.** Signing in identifies you whatever the location settings say; see
+  "Your identity in accounts" below.
+- **The system language, keyboard layouts and fonts.** They are your working
+  environment, and changing them would make the system hard to use. They are a weaker
+  signal than a region, but still a signal: a Russian keyboard layout on a Mac that
+  claims to be in Germany is not unusual, but it is not nothing either.
+- **Browser fingerprinting in general.** Canvas, WebGL, screen size, installed fonts and
+  hardware details identify a browser across IP addresses; see below.
+- **The Wi-Fi hardware address.** The network you join sees it. Recent macOS versions can
+  use a private address per network (Wi-Fi settings, Private Wi-Fi Address); oneexit
+  does not touch this setting.
+
+**Undo.** `harden` records every previous value in
+`/usr/local/etc/oneexit/privacy-state` before it changes anything, and a second `harden`
+keeps that file, so `sudo oneexit unharden` always restores the values from before the
+first one and then removes the file. `oneexit uninstall` does the same automatically
+(`--keep-privacy` leaves the hardened settings in place). Log out and back in afterwards
+so that every app picks up the restored time zone and region.
+
 ## What is not protected
 
 Be clear about these before you rely on oneexit.

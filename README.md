@@ -11,12 +11,9 @@ WireGuard tunnel to your own VPS. Everything else is dropped by `pf` before logi
 kept dropped by a watchdog.
 
 ```bash
-# on a fresh Debian 12 / Ubuntu 24.04 VPS
-git clone https://github.com/kvozianov/oneexit.git && sudo bash oneexit/server/install.sh
-
-# on the Mac, booted from the external SSD
-git clone https://github.com/kvozianov/oneexit.git && sudo bash oneexit/client/setup.sh --config mac.conf
-oneexit leak-test
+# on the Mac, booted from the external SSD; the VPS is a fresh Debian 12 / Ubuntu 24.04
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/kvozianov/oneexit/main/install.sh)"
+sudo oneexit init --server root@YOUR_VPS
 ```
 
 > **Scope.** oneexit is a set of shell scripts: a server installer, a client setup with
@@ -77,6 +74,8 @@ flowchart LR
     wgs --> nft
   end
   nft --> world((Internet))
+  init(["sudo oneexit init"]) -- "setup + hardening" --> launchd
+  init -- "ssh: upload server/, run install.sh,<br/>fetch the peer config" --> wgs
 ```
 
 - **External SSD boot.** macOS is installed on an external SSD and oneexit is set up
@@ -97,23 +96,86 @@ flowchart LR
   3 minutes so you can click through a hotel or café login page; then the daemons lock the
   firewall, restore DNS and bring the tunnel back up by themselves.
 
-## Install in 5 steps
+## Install
 
-You need: an external SSD (USB 3.1 Gen 2 or Thunderbolt), a Mac that can boot from it,
-and a VPS with a public IPv4 address. Plan about an hour, most of it the macOS install.
+You need: an external SSD (USB 3.1 Gen 2 or Thunderbolt) with macOS installed on it
+([docs/install-macos-external.md](docs/install-macos-external.md) covers Apple silicon,
+Intel Macs with a T2 chip, FileVault and a first-boot checklist), a VPS with a public
+IPv4 address and your SSH key on it ([docs/vps.md](docs/vps.md) explains how to choose
+and create one), and [Homebrew](https://brew.sh) on the external macOS. Plan about an
+hour, most of it the macOS install; oneexit itself takes a few minutes.
 
-### 1. Install macOS on the external SSD
+On the Mac, booted from the external SSD:
 
-Follow [docs/install-macos-external.md](docs/install-macos-external.md). It covers Apple
-silicon, Intel Macs with a T2 chip and older Intel Macs, FileVault on the external
-volume and a first-boot checklist (no iCloud, no analytics).
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/kvozianov/oneexit/main/install.sh)"
+sudo oneexit init --server root@YOUR_VPS
+```
 
-### 2. Rent a VPS and install the server
+The first command downloads one pinned release, checks its SHA-256 against the value
+in the script, unpacks it to `/usr/local/share/oneexit/<version>` and links
+`/usr/local/bin/oneexit`. It never runs anything else; `--dry-run` shows what it would
+do. The second command sets up the server and the Mac. Add `--dry-run` to it first if
+you want to see every ssh command and every file before anything changes.
 
-Any small KVM server with Debian 12 or Ubuntu 24.04 works; [docs/vps.md](docs/vps.md)
-explains how to choose one. Log in over SSH, clone the repository and run the installer
-(it is a few hundred lines of plain bash; read it first, and try `--dry-run`, which prints
-every command and every file it would write without changing anything):
+Without `--server`, `sudo oneexit init` asks for the server address, the time zone and
+the region. Other options: `--ssh-key PATH`, `--port N` (WireGuard port, default `51820`;
+`443` helps on restrictive networks), `--peer NAME` (default `mac`), `--timezone TZ`,
+`--region RR`, `--no-harden`. A login other than root works if it may use `sudo`
+without a password: `--server debian@YOUR_VPS`. A non-standard SSH port goes after the
+address: `--server root@YOUR_VPS:2222`.
+
+### What init does
+
+Each step prints `Step N/6` and a one-line result.
+
+1. **Pre-flight.** Checks that macOS runs from an external disk (and stops with an
+   explanation if not; override with `--allow-internal-disk`), that `/etc/pf.conf` has
+   the stock anchor hook, that Homebrew and `ssh` are there, and that the server address
+   makes sense.
+2. **Server login.** `ssh -o BatchMode=yes` to the server, as the user who ran `sudo`,
+   with that user's keys. A server seen for the first time is added to `known_hosts`; a
+   changed host key stops it. If the login fails, it prints the command to try by hand
+   and the usual causes. It also asks the server for its time zone: the Mac adopts it,
+   unless it is UTC, in which case `Europe/Berlin` is used.
+3. **Server install.** Copies the repository's `server/` directory to `/opt/oneexit` on
+   the server, runs `server/install.sh` there with the address the Mac connected to
+   (its output appears in your terminal, keys hidden), and fetches the new peer config
+   into a private temporary file. Running `init` again keeps the server's keys and peers.
+4. **Client setup.** The same steps as `client/setup.sh`: `wireguard-tools` and
+   `wireguard-go` from Homebrew, `/usr/local/etc/wireguard/wg0.conf` (root, mode 0600,
+   without its `DNS` line and with the `Endpoint` pinned to the server's IP),
+   `/usr/local/etc/oneexit/config`, the pf anchor, the two launchd daemons, IPv6 off and
+   DNS `10.66.0.1` on every network service.
+5. **Hardening.** `oneexit harden` with the chosen time zone and region (see
+   [Environment hardening](#environment-hardening)); `--no-harden` skips it.
+6. **Verification.** Waits up to 30 seconds for the first WireGuard handshake, runs the
+   leak test against the server's IP and prints a summary: the status, how to get
+   through a hotel login page, how to undo everything, where the logs are.
+
+From step 4 on, the Mac can reach the internet only through the tunnel.
+
+### The audited alternative: clone, read, dry-run, run
+
+If you would rather not pipe a script from the internet into bash, use git (Homebrew
+installs the Xcode command-line tools, which include it):
+
+```bash
+git clone https://github.com/kvozianov/oneexit.git
+cd oneexit
+less client/lib/init.sh client/lib/setup_steps.sh server/install.sh   # it is plain bash
+client/oneexit init --server root@YOUR_VPS --dry-run
+sudo client/oneexit init --server root@YOUR_VPS
+```
+
+The dry run prints every ssh and tar command, the server install command, every file
+the client setup would write and every setting hardening would change, and contacts
+nothing: no ssh, no DNS lookups, no downloads.
+
+### Installing the server by hand
+
+To set up the server yourself instead (or to see what `init` does there): log in over
+SSH, clone the repository and run the installer.
 
 ```bash
 git clone https://github.com/kvozianov/oneexit.git
@@ -123,71 +185,38 @@ sudo bash server/install.sh
 ```
 
 Options: `--port N` (default `51820`), `--endpoint HOST_OR_IP` (the address written into
-client configs), `--peer NAME` (name of the first client, default `mac`), for example
-`sudo bash server/install.sh --port 443 --peer travel-mac`. Re-running the installer keeps
-existing keys and peers.
+client configs), `--peer NAME` (name of the first client, default `mac`), `--timezone TZ`
+(reported to the Mac, default the server's own), for example
+`sudo bash server/install.sh --port 443 --peer travel-mac`. Re-running the installer
+keeps existing keys and peers. At the end it prints the first client config and the same
+config as a QR code; the file is saved on the server as `/etc/wireguard/peers/mac.conf`.
 
-At the end the installer prints the first client config and the same config as a QR
-code. The file is saved on the server as `/etc/wireguard/peers/mac.conf`.
-
-### 3. Move the client config to the Mac
-
-Boot the Mac from the external SSD. The kill switch is not active yet, so the Mac still
-has normal network access. Copy the config over SSH:
+Then copy the config to the Mac (the kill switch is not active yet, so the Mac still has
+normal network access) and run the client part of `init` only:
 
 ```bash
 scp root@YOUR_VPS_IP:/etc/wireguard/peers/mac.conf ./mac.conf
+sudo oneexit init --config mac.conf      # or, from a clone: sudo client/setup.sh --config mac.conf
 ```
 
-Or copy the text printed by the installer into a file named `mac.conf`. The QR code is
-the same config in a form a phone camera can read; it is most useful for adding a phone
-as a second peer (see [docs/vps.md](docs/vps.md)). The file contains a private key: keep
-it out of cloud folders and delete your copy after setup.
+The file contains a private key: keep it out of cloud folders and delete your copy after
+setup. The QR code is most useful for adding a phone as a second peer. Details:
+[docs/vps.md](docs/vps.md).
 
-### 4. Set up the Mac
-
-Install [Homebrew](https://brew.sh) first (it also installs the Xcode command-line tools,
-which include `git`):
-
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-```
-
-Then:
-
-```bash
-git clone https://github.com/kvozianov/oneexit.git
-cd oneexit
-sudo client/setup.sh --config mac.conf --dry-run   # optional: see what it will do
-sudo client/setup.sh --config mac.conf
-```
-
-`setup.sh`:
-
-1. Checks that the running system is booted from an external disk and stops with an
-   explanation if it is not (override with `--allow-internal-disk`).
-2. Installs `wireguard-tools` and `wireguard-go` with Homebrew, installs the config as
-   `/usr/local/etc/wireguard/wg0.conf` (root, mode 0600) and writes
-   `/usr/local/etc/oneexit/config` with the server address and port. If the `Endpoint`
-   is a hostname, it is resolved once now, because pf rules need an IP address.
-3. Writes the pf anchor and the two launchd daemons, turns IPv6 off and sets DNS to
-   `10.66.0.1` for every network service, and starts the daemons.
-4. Prints the next steps.
-
-From this point the Mac can reach the internet only through the tunnel.
-
-### 5. Check it
+### Check it
 
 ```bash
 oneexit status
-oneexit leak-test
+sudo oneexit leak-test
 ```
 
 `status` shows whether pf is enabled, whether the anchor is loaded, the lock state, the
-age of the last WireGuard handshake and your external IP as seen through the tunnel.
-`leak-test` runs eight checks (pf and anchor, handshake, public IPv4, IPv6, DNS
-resolver, direct interface, Bonjour sanity, and a manual WebRTC hint) and exits with
-code 1 if any of them fails. `--json` prints machine-readable results.
+age of the last WireGuard handshake, your external IP as seen through the tunnel and
+whether the privacy settings are hardened. `leak-test` runs the network checks (pf and
+anchor, handshake, public IPv4, IPv6, DNS resolver, direct interface, Bonjour sanity, a
+manual WebRTC hint) and the environment checks (time zone, Location Services, computer
+name, region), and exits with code 1 if any of them fails. `--json` prints
+machine-readable results.
 
 ## Daily use
 
@@ -195,12 +224,15 @@ Commands that change the firewall or the tunnel need root: run them with `sudo`.
 
 | Command | What it does |
 |---|---|
+| `oneexit init --server root@VPS` | One-command setup of the server and this Mac (see [Install](#install)); `--config FILE` for a server installed by hand. |
 | `oneexit status` | pf enabled, anchor loaded, lock state, handshake age, external IP via the tunnel. |
 | `oneexit lock` | Load the locked ruleset now (ends an `unlock` or `portal` window early). |
 | `oneexit unlock [--minutes N]` | Allow all traffic for N minutes (default 10), then lock again automatically. |
 | `oneexit portal [--minutes N]` | Captive-portal window: allow web and DNS on the physical interface for N minutes (default 3). |
 | `oneexit up` | Bring the tunnel up. |
 | `oneexit down` | Bring the tunnel down. The firewall stays locked, so the Mac is offline. |
+| `oneexit harden [--timezone TZ] [--region RR]` | Keep macOS from telling apps where it is (see [Environment hardening](#environment-hardening)). |
+| `oneexit unharden` | Restore the settings that `harden` changed. |
 | `oneexit leak-test` | Run the leak checks; exit code 1 on any `FAIL`. |
 | `oneexit doctor` | Check the environment: boot disk, installed tools and versions, file permissions. |
 | `oneexit logs` | Show the firewall and tunnel daemon logs (`/var/log/oneexit/`). |
@@ -219,6 +251,27 @@ the locked ruleset again, restore the tunnel DNS and bring the tunnel back up on
 own; you do not need to remember to close it. During the window, any app on the Mac can
 reach the web directly, so open the portal page first and do nothing else until
 `oneexit status` shows the tunnel up again. `sudo oneexit lock` closes the window early.
+
+## Environment hardening
+
+The tunnel hides where the Mac connects from. It does not stop macOS from telling apps
+where the Mac is and whose it is. `oneexit harden` (run by `init` and `setup.sh` unless
+`--no-harden`) closes the main channels on the external macOS:
+
+| Channel | What harden changes |
+|---|---|
+| Location Services (macOS locates the Mac from nearby Wi-Fi networks, tunnel or not) | Off, system-wide; the server's resolver also answers NXDOMAIN for Apple's Wi-Fi positioning host |
+| Automatic time zone (follows the location; every website can read the zone) | Off; time zone set to the exit country's |
+| Region in the locale (`ru_KZ`, `Accept-Language: ru-KZ`) | Region replaced (`ru_KZ` becomes `ru_DE`); the language stays |
+| Computer name (sent by DHCP to every network) | `Mac` |
+| WebRTC in Chrome, Brave, Edge, Chromium and Firefox | No LAN address offered to websites |
+| Lookup and Safari search suggestions | Off |
+
+Every previous value is recorded first, so `sudo oneexit unharden` (and `uninstall`)
+puts it back exactly. Your Apple ID, keyboard layouts, fonts and system language are
+left alone on purpose. The leak test checks the time zone, Location Services, the
+computer name and the region. Why each setting matters and what remains:
+[docs/threat-model.md](docs/threat-model.md#location-time-zone-and-names).
 
 ## What is blocked and what is allowed
 
@@ -313,10 +366,14 @@ server/
   lib/common.sh         logging, run()/dry-run, root check, OS detection
   lib/wg.sh             key generation, server/peer config rendering (pure functions)
   templates/            unbound.conf, nftables.conf, sysctl.conf templates
+install.sh              bootstrap for the Mac: pinned release, SHA-256 check, /usr/local/bin/oneexit link
 client/
   setup.sh              first-run setup of a fresh macOS on the external disk
-  oneexit               the CLI (single bash file), installed to /usr/local/bin/oneexit
+  oneexit               the CLI, linked or installed to /usr/local/bin/oneexit
   uninstall.sh          restores the stock configuration
+  lib/init.sh           oneexit init: ssh to the server, install it, then the client steps
+  lib/setup_steps.sh    the steps of setup.sh as functions (shared with init)
+  lib/privacy.sh        oneexit harden / unharden
   lib/pf.sh             render_pf() pure function + anchor load/unload helpers
   lib/wgconf.sh         parse a wg-quick config (Endpoint, Address, DNS, PublicKey, ...)
   lib/common.sh         logging, run()/dry-run, root check, external-disk detection
@@ -324,7 +381,8 @@ client/
   bin/oneexit-tunneld   daemon: wg-quick up, handshake watchdog, re-up on network change
   launchd/              com.oneexit.firewall.plist, com.oneexit.tunnel.plist
 scripts/
-  leak-test.sh          IPv4 / IPv6 / DNS resolver / direct-interface / Bonjour checks
+  leak-test.sh          IPv4 / IPv6 / DNS resolver / direct-interface / Bonjour / environment checks
+  release-checksum.sh   SHA-256 of a release tarball, for install.sh
 docs/                   install-macos-external.md, vps.md, threat-model.md, faq.md, architecture.md
 tests/                  bats-core tests: server/, client/, helpers/
 .github/workflows/ci.yml
@@ -342,7 +400,7 @@ OS. The tests are built on that, and on pure functions that render configs.
 Locally (needs `bats-core` and `shellcheck`, for example `brew install bats-core shellcheck`):
 
 ```bash
-shellcheck server/*.sh server/lib/*.sh client/*.sh client/lib/*.sh client/oneexit client/bin/* scripts/*.sh
+shellcheck install.sh server/*.sh server/lib/*.sh client/*.sh client/lib/*.sh client/oneexit client/bin/* scripts/*.sh
 bats tests/server tests/client    # or: bats -r tests
 ```
 
@@ -354,7 +412,8 @@ In CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)):
   portal ruleset, config parsing, server and peer config rendering, peer address
   allocation, the internal-disk refusal, `plutil -lint` on the plists;
 - on macOS, the generated rules are parsed by the real `pfctl -nvf`, and
-  `client/setup.sh --dry-run` runs end to end;
+  `client/setup.sh --dry-run` and `oneexit init --dry-run` run end to end; the bootstrap
+  `install.sh --dry-run` runs on both OSes;
 - on Ubuntu, `server/install.sh` runs for real as root, and the job checks that `wg0`
   is up, the nftables ruleset contains the masquerade rule, unbound listens on
   `10.66.0.1:53`, and `peer.sh add` prints a valid client config.

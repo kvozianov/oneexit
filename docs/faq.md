@@ -16,6 +16,8 @@
 - [What about Time Machine and iCloud?](#what-about-time-machine-and-icloud)
 - [Does it slow the connection?](#does-it-slow-the-connection)
 - [My VPS got a new IP address. What now?](#my-vps-got-a-new-ip-address-what-now)
+- [Why does oneexit change my time zone and computer name?](#why-does-oneexit-change-my-time-zone-and-computer-name)
+- [How do I undo the privacy changes?](#how-do-i-undo-the-privacy-changes)
 
 ## Why not just the WireGuard app from the App Store?
 
@@ -190,3 +192,47 @@ sudo client/uninstall.sh --keep-keys
 # edit Endpoint in your copy of the config (or take the new one from the server)
 sudo client/setup.sh --config mac.conf
 ```
+
+## Why does oneexit change my time zone and computer name?
+
+Because the tunnel hides where your connections come from, but not where the Mac is.
+macOS finds its own position from the Wi-Fi networks around it (Location Services), and
+that works through any tunnel, because the access points give the location away, not
+the IP address. The automatic time zone follows that position, and every website can
+read the time zone. The region in your locale (`ru_KZ`) and in your language list
+(`ru-KZ`, which browsers send to every site) names a country. And the computer name,
+by default something like "Anna's MacBook Pro", is sent by the DHCP client to every
+network the Mac joins.
+
+So `oneexit harden`, which setup runs unless you pass `--no-harden`, turns Location
+Services and the automatic time zone off, sets the time zone and region of the exit
+country (by default the server's own time zone, else `Europe/Berlin` and `DE`), renames
+the Mac to `Mac`, and stops Chrome-family browsers and Firefox from showing your LAN
+address through WebRTC. Your language, keyboard layouts and fonts stay as they are. To
+pick another exit country:
+
+```bash
+sudo oneexit harden --timezone Europe/Amsterdam --region NL
+```
+
+`oneexit leak-test` checks the result (checks 9 to 12), and `oneexit doctor` lists every
+setting next to the value it should have. See
+[the threat model](threat-model.md#location-time-zone-and-names) for what is and is not
+covered.
+
+## How do I undo the privacy changes?
+
+```bash
+sudo oneexit unharden
+```
+
+Before it changes anything, `harden` saves the previous values (Location Services, time
+zone, locale and languages, the three computer names, browser policies, search
+suggestions) in `/usr/local/etc/oneexit/privacy-state`. Running `harden` again keeps that
+file, so `unharden` always goes back to the settings from before the first `harden`,
+and then deletes it. Add `--dry-run` to see every command first. Log out and back in
+afterwards so that all apps pick up the restored settings.
+
+`sudo oneexit uninstall` restores them as well. If you want to keep the hardened
+settings after removing oneexit, use `sudo oneexit uninstall --keep-privacy`; it prints
+the old values so you can still restore them by hand.

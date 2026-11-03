@@ -32,10 +32,15 @@ AllowedIPs = ${ip}/32
 CONF
 }
 
-# render_peer_conf PEER_PRIVKEY PEER_IP SERVER_PUBKEY ENDPOINT PORT
-# The wg-quick client config. IPv6 is intentionally absent in v1.
+# render_peer_conf PEER_PRIVKEY PEER_IP SERVER_PUBKEY ENDPOINT PORT [TIMEZONE]
+# The wg-quick client config. IPv6 is intentionally absent in v1. With
+# TIMEZONE, the first line is the comment "# oneexit-timezone = TIMEZONE"
+# (wg-quick ignores it; the Mac client adopts the server's time zone).
 render_peer_conf() {
-  local privkey="$1" ip="$2" server_pubkey="$3" endpoint="$4" port="$5"
+  local privkey="$1" ip="$2" server_pubkey="$3" endpoint="$4" port="$5" tz="${6:-}"
+  if [[ -n "${tz}" ]]; then
+    printf '# oneexit-timezone = %s\n' "${tz}"
+  fi
   cat <<CONF
 [Interface]
 PrivateKey = ${privkey}

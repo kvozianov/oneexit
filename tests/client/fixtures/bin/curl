@@ -8,6 +8,10 @@
 #   --interface ... 1.1.1.1  FAKE_CURL_DIRECT: unreach (default; no route via the
 #                          interface while the tunnel is up), timeout, open
 #   --interface ... the gateway  FAKE_CURL_GW: timeout (default), refused
+# Every call is recorded in FAKE_CALL_LOG, if set.
+if [ -n "${FAKE_CALL_LOG:-}" ]; then
+  printf 'curl %s\n' "$*" >>"${FAKE_CALL_LOG}"
+fi
 v6=0
 iface=""
 url=""

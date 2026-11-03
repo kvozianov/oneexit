@@ -28,6 +28,9 @@ Options:
                           (default: ENDPOINT from /etc/wireguard/oneexit.env)
   --port N                server UDP port written into client configs
                           (default: PORT from /etc/wireguard/oneexit.env)
+  --timezone TZ           time zone written as "# oneexit-timezone = TZ" at the
+                          top of client configs (default: TIMEZONE from
+                          /etc/wireguard/oneexit.env; no line when unset)
   --dry-run               print commands and file contents, change nothing
   -h, --help              show this help
 
@@ -49,6 +52,7 @@ STATE_FILE="${WG_DIR}/oneexit.env"
 
 OPT_ENDPOINT=""
 OPT_PORT=""
+OPT_TIMEZONE=""
 
 # Serialise concurrent add/revoke runs (Linux, real mode only).
 take_lock() {
@@ -79,6 +83,11 @@ resolve_endpoint_port() {
   fi
   valid_endpoint "${ENDPOINT}" || die "invalid endpoint: ${ENDPOINT}"
   valid_port "${PORT}" || die "invalid port: ${PORT}"
+  TIMEZONE="${OPT_TIMEZONE:-${STATE_TIMEZONE}}"
+  if [[ -n "${TIMEZONE}" ]] && ! valid_timezone_name "${TIMEZONE}"; then
+    warn "ignoring the invalid time zone '${TIMEZONE}' from ${STATE_FILE}"
+    TIMEZONE=""
+  fi
 }
 
 server_pubkey() {
@@ -150,7 +159,7 @@ cmd_add() {
   if is_dry_run || [[ ! -d "${PEERS_DIR}" ]]; then
     run install -d -m 0700 "${PEERS_DIR}"
   fi
-  config="$(render_peer_conf "${priv}" "${ip}" "${srv_pub}" "${ENDPOINT}" "${PORT}")"
+  config="$(render_peer_conf "${priv}" "${ip}" "${srv_pub}" "${ENDPOINT}" "${PORT}" "${TIMEZONE}")"
   printf '%s\n' "${config}" | write_file "${PEERS_DIR}/${name}.conf" 0600
   printf '%s\n' "${pub}" | write_file "${PEERS_DIR}/${name}.pub" 0644
   ok "peer ${name}: ${ip}, endpoint ${ENDPOINT}:${PORT}; config saved to ${PEERS_DIR}/${name}.conf"
@@ -223,6 +232,12 @@ main() {
         shift
         ;;
       --port=*) OPT_PORT="${1#*=}" ;;
+      --timezone)
+        (($# >= 2)) || usage_error "--timezone needs a value"
+        OPT_TIMEZONE="$2"
+        shift
+        ;;
+      --timezone=*) OPT_TIMEZONE="${1#*=}" ;;
       -h | --help)
         usage
         exit 0
@@ -246,6 +261,9 @@ main() {
   fi
   if [[ -n "${OPT_PORT}" ]] && ! valid_port "${OPT_PORT}"; then
     usage_error "invalid --port: ${OPT_PORT} (1-65535)"
+  fi
+  if [[ -n "${OPT_TIMEZONE}" ]] && ! valid_timezone "${OPT_TIMEZONE}"; then
+    usage_error "invalid --timezone: ${OPT_TIMEZONE} (a name from $(zoneinfo_dir), e.g. Europe/Berlin)"
   fi
   ((${#args[@]} > 0)) || usage_error "missing COMMAND"
 

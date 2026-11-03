@@ -21,13 +21,13 @@ jobs:
           shellcheck --version
       - name: shellcheck
         run: |
-          files=$(git ls-files '*.sh' '*.bash' 'client/oneexit' 'client/bin/*' 'tests/client/fixtures/bin/*')
+          files=$(git ls-files '*.sh' '*.bash' 'client/oneexit' 'client/bin/*' 'tests/client/fixtures/bin/*' 'install.sh')
           echo "$files"
           # shellcheck disable=SC2086
           shellcheck -x $files
       - name: bash -n
         run: |
-          for f in $(git ls-files '*.sh' 'client/oneexit' 'client/bin/*'); do bash -n "$f"; done
+          for f in $(git ls-files '*.sh' 'client/oneexit' 'client/bin/*' 'install.sh'); do bash -n "$f"; done
 
   bats:
     name: bats (${{ matrix.os }})
@@ -50,6 +50,7 @@ jobs:
           bash server/peer.sh add laptop --dry-run --endpoint 203.0.113.5
           bash scripts/leak-test.sh --dry-run
           bash client/uninstall.sh --dry-run
+          bash install.sh --dry-run
 
   macos-dry-run:
     name: macOS dry run + pf syntax
@@ -71,6 +72,9 @@ jobs:
           PersistentKeepalive = 25
           EOF
           bash client/setup.sh --config /tmp/peer.conf --allow-internal-disk --dry-run
+      - name: oneexit init dry run (no ssh, no network)
+        # CI runners boot from an internal disk, as does any Mac used to preview.
+        run: bash client/oneexit init --server root@203.0.113.5 --allow-internal-disk --dry-run
       - name: pf syntax check of rendered rules
         run: |
           set -e

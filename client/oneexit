@@ -27,12 +27,20 @@ fi
 . "${LIB_DIR}/pf.sh"
 # shellcheck source=lib/wgconf.sh
 . "${LIB_DIR}/wgconf.sh"
+# shellcheck source=lib/privacy.sh
+. "${LIB_DIR}/privacy.sh"
 
 usage() {
   cat <<USAGE
 Usage: oneexit [--dry-run] COMMAND [options]
 
 Commands:
+  init --server [USER@]HOST[:PORT] [options]
+                            one-command setup: install the VPS over ssh, then
+                            this Mac (kill switch, tunnel, hardening), then run
+                            the leak test (see: oneexit init --help)
+  init --config PEER.conf   the same for a server installed by hand: client
+                            setup and hardening only
   status                    pf, lock mode, tunnel, handshake and public IP at a glance
   lock                      end any unlock/portal window now: locked ruleset,
                             tunnel DNS restored
@@ -43,6 +51,12 @@ Commands:
                             in to a captive portal
   up                        start the tunnel (and its watchdog)
   down                      stop the tunnel and its watchdog; the kill switch stays on
+  harden [--timezone TZ] [--region RR]
+                            keep macOS from revealing where it is: Location
+                            Services off, time zone and region of the exit
+                            country, generic computer name, no LAN address in
+                            WebRTC (defaults: TIMEZONE and REGION from the config)
+  unharden                  restore the settings that harden changed
   leak-test [options]       run the leak test (see: oneexit leak-test --help)
   doctor                    full diagnostics
   logs [-f] [-n LINES]      show the firewall and tunnel logs
@@ -51,8 +65,9 @@ Commands:
   help                      show this help
 
 Commands that read pf or WireGuard state or change it re-run themselves with
-sudo. Commands that change state (lock, unlock, portal, up, down, uninstall)
-accept --dry-run to print what they would do instead.
+sudo. Commands that change state (init, lock, unlock, portal, up, down,
+harden, unharden, uninstall) accept --dry-run to print what they would do
+instead.
 USAGE
 }
 
@@ -241,6 +256,8 @@ cmd_status() {
   else
     printf '  public IPv4:  %s\n' "${ip}"
   fi
+  # shellcheck disable=SC2119 # time zone, region and user default to the config
+  printf '  privacy:      %s\n' "$(privacy_status)"
 }
 
 cmd_lock() {
@@ -337,6 +354,137 @@ cmd_down() {
   log_info "until 'sudo oneexit up' (or the next reboot)."
 }
 
+harden_usage() {
+  cat <<USAGE
+Usage: sudo oneexit harden [--timezone TZ] [--region RR] [--dry-run]
+
+Keeps macOS from telling apps where it is, which the tunnel cannot hide:
+  * Location Services off (macOS locates the Mac from nearby Wi-Fi networks)
+  * automatic time zone off, time zone set to TZ
+  * region RR in your locale (ru_KZ becomes ru_DE; the language stays)
+  * computer name, host name and local host name set to "${PRIVACY_GENERIC_NAME}"
+  * Chrome, Brave, Edge, Chromium and Firefox: no LAN address in WebRTC
+  * Lookup and Safari search suggestions off
+The previous values are recorded once in ${ONEEXIT_PRIVACY_STATE};
+"sudo oneexit unharden" puts them back.
+
+Options:
+  --timezone TZ   a zone from ${ONEEXIT_ZONEINFO}, e.g. Europe/Berlin
+                  (default: TIMEZONE from ${ONEEXIT_CONFIG})
+  --region RR     two-letter country code, e.g. DE (default: the country of
+                  --timezone, else REGION from the config)
+  --dry-run       print every command and the state file instead
+  --help          show this help
+USAGE
+}
+
+cmd_harden() {
+  local tz="" region="" tz_given=0 user rc=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --timezone | --tz)
+        [ "$#" -ge 2 ] || usage_error "--timezone needs a value"
+        tz="$2"
+        tz_given=1
+        shift
+        ;;
+      --timezone=*)
+        tz="${1#--timezone=}"
+        tz_given=1
+        ;;
+      --region)
+        [ "$#" -ge 2 ] || usage_error "--region needs a value"
+        region="$2"
+        shift
+        ;;
+      --region=*) region="${1#--region=}" ;;
+      --dry-run) DRY_RUN=1 ;;
+      -h | --help)
+        harden_usage
+        return 0
+        ;;
+      *) usage_error "unknown option: $1" ;;
+    esac
+    shift
+  done
+  [ -n "${tz}" ] || tz="$(privacy_config_value TIMEZONE || true)"
+  if [ -z "${tz}" ]; then
+    usage_error "no time zone: pass --timezone (for example: sudo oneexit harden --timezone ${PRIVACY_DEFAULT_TIMEZONE} --region ${PRIVACY_DEFAULT_REGION})"
+  fi
+  tz_is_valid "${tz}" || usage_error "unknown time zone: ${tz} (no such file in ${ONEEXIT_ZONEINFO}; for example ${PRIVACY_DEFAULT_TIMEZONE})"
+  if [ -z "${region}" ] && [ "${tz_given}" -eq 1 ]; then
+    region="$(region_from_timezone "${tz}")"
+  fi
+  [ -n "${region}" ] || region="$(privacy_config_value REGION || true)"
+  [ -n "${region}" ] || region="$(region_from_timezone "${tz}")"
+  [ -n "${region}" ] || usage_error "no region known for ${tz}: pass --region (two letters, for example --region ${PRIVACY_DEFAULT_REGION})"
+  region="$(region_normalize "${region}")"
+  region_is_valid "${region}" || usage_error "invalid region: ${region} (two letters, for example ${PRIVACY_DEFAULT_REGION})"
+  require_root
+  user="$(privacy_user)"
+  if is_dry_run; then
+    log_info "Dry run: nothing will be changed. Commands and files are printed below."
+  fi
+  harden_apply "${tz}" "${region}" "${user}" || rc=$?
+  privacy_config_set "${tz}" "${region}"
+  cat <<NEXT
+
+Log out and back in (or restart) so that every app picks up the new time zone
+and region. Check with: sudo oneexit leak-test
+Undo: sudo oneexit unharden
+NEXT
+  return "${rc}"
+}
+
+cmd_unharden() {
+  local rc=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dry-run) DRY_RUN=1 ;;
+      -h | --help)
+        cat <<USAGE
+Usage: sudo oneexit unharden [--dry-run]
+
+Restores the settings recorded in ${ONEEXIT_PRIVACY_STATE} by the first
+"oneexit harden" (Location Services, time zone, locale, computer names,
+browser WebRTC policies, search suggestions), then removes that file.
+USAGE
+        return 0
+        ;;
+      *) usage_error "unknown option: $1" ;;
+    esac
+    shift
+  done
+  require_root
+  if is_dry_run; then
+    log_info "Dry run: nothing will be changed."
+  fi
+  if [ ! -e "${ONEEXIT_PRIVACY_STATE}" ]; then
+    log_ok "no ${ONEEXIT_PRIVACY_STATE}: oneexit harden has not run (or was undone); nothing to restore"
+    return 0
+  fi
+  unharden_apply || rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    log_info "Log out and back in (or restart) so that every app picks up the restored settings."
+  fi
+  return "${rc}"
+}
+
+cmd_init() {
+  local lib
+  for lib in setup_steps.sh init.sh; do
+    [ -f "${LIB_DIR}/${lib}" ] || die "${LIB_DIR}/${lib} is missing; reinstall oneexit (install.sh) or run from a checkout"
+  done
+  # shellcheck source=lib/setup_steps.sh
+  . "${LIB_DIR}/setup_steps.sh"
+  # shellcheck source=lib/init.sh
+  . "${LIB_DIR}/init.sh"
+  # Usage errors (no server and no terminal to ask on) come before sudo.
+  init_parse_args "$@"
+  ensure_root "${ORIG_ARGS[@]}"
+  init_run
+}
+
 cmd_leak_test() {
   local script
   script="$(find_script "${ONEEXIT_LIBEXEC}/leak-test.sh" "${SELF_DIR}/../scripts/leak-test.sh")" ||
@@ -399,6 +547,34 @@ doc_tool() {
   else
     doc_bad "${name}" "missing (brew install wireguard-tools wireguard-go)"
   fi
+}
+
+# doctor_privacy: each hardening setting, current value vs expected. A
+# mismatch is a problem only after "oneexit harden" (the state file exists).
+doctor_privacy() {
+  local name res cur exp scope hardened=0
+  [ -e "${ONEEXIT_PRIVACY_STATE}" ] && hardened=1
+  if [ "${hardened}" -eq 1 ]; then
+    doc_info "state" "${ONEEXIT_PRIVACY_STATE} (undo with: sudo oneexit unharden)"
+  else
+    doc_info "state" "not hardened (sudo oneexit harden)"
+  fi
+  while IFS='|' read -r name res cur exp scope; do
+    [ -n "${name}" ] || continue
+    case "${res}" in
+      ok) doc_ok "${name}" "${cur}" ;;
+      bad)
+        if [ "${hardened}" -eq 1 ] && [ "${scope}" = "core" ]; then
+          doc_bad "${name}" "${cur} (expected ${exp})"
+        else
+          doc_info "${name}" "${cur} (harden sets: ${exp})"
+        fi
+        ;;
+      *) doc_info "${name}" "${cur}" ;;
+    esac
+  done <<EOT
+$(privacy_report)
+EOT
 }
 
 cmd_doctor() {
@@ -518,6 +694,9 @@ cmd_doctor() {
 $(network_services)
 EOT
 
+  printf '\nPrivacy\n'
+  doctor_privacy
+
   printf '\n'
   if [ "${DOCTOR_PROBLEMS}" -eq 0 ]; then
     log_ok "no problems found"
@@ -573,7 +752,7 @@ fi
 command_name="$1"
 shift
 case "${command_name}" in
-  status | doctor | lock | unlock | portal | up | down | uninstall | leak-test)
+  status | doctor | lock | unlock | portal | up | down | harden | unharden | uninstall | leak-test)
     ensure_root "${ORIG_ARGS[@]}"
     ;;
   logs)
@@ -584,12 +763,15 @@ case "${command_name}" in
   *) ;;
 esac
 case "${command_name}" in
+  init) cmd_init "$@" ;;
   status) cmd_status "$@" ;;
   lock) cmd_lock "$@" ;;
   unlock) cmd_unlock "$@" ;;
   portal) cmd_portal "$@" ;;
   up) cmd_up "$@" ;;
   down) cmd_down "$@" ;;
+  harden) cmd_harden "$@" ;;
+  unharden) cmd_unharden "$@" ;;
   leak-test)
     if is_dry_run; then set -- --dry-run "$@"; fi
     cmd_leak_test "$@"

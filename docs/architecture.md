@@ -36,6 +36,7 @@ flowchart LR
 ## Repository layout
 
 ```
+install.sh              bootstrap for the Mac: pinned release tarball, SHA-256 check, /usr/local/bin/oneexit link
 server/
   install.sh            one-command WireGuard + unbound + nftables installer (root, Debian/Ubuntu)
   peer.sh               add | revoke | qr | list peers; prints a wg-quick client config
@@ -46,6 +47,9 @@ client/
   setup.sh              first-run setup of a fresh macOS on the external disk
   oneexit               the CLI (single bash file), installed to /usr/local/bin/oneexit
   uninstall.sh          restores the stock configuration
+  lib/init.sh           oneexit init: target parsing, ssh/tar command builders, the six steps
+  lib/setup_steps.sh    the steps of setup.sh as functions (setup.sh and init call them)
+  lib/privacy.sh        oneexit harden / unharden
   lib/pf.sh             render_pf() pure function + anchor load/unload helpers
   lib/wgconf.sh         parse a wg-quick config (Endpoint, Address, DNS, PublicKey, ...)
   lib/common.sh         logging, run()/dry-run, root check, external-disk detection
@@ -55,6 +59,7 @@ client/
   launchd/com.oneexit.tunnel.plist
 scripts/
   leak-test.sh          IPv4 / IPv6 / DNS resolver / direct-interface / Bonjour checks; exit 1 on any FAIL
+  release-checksum.sh   prints the SHA-256 of a release tag tarball for install.sh
 docs/                   install-macos-external.md, vps.md, threat-model.md, faq.md, architecture.md
 tests/
   server/*.bats  client/*.bats  helpers/           bats-core tests
@@ -253,3 +258,148 @@ Checks, each printed as `PASS`/`FAIL`/`SKIP` with a one-line reason; exit 1 if a
   ubuntu `server-install` job runs `sudo server/install.sh --endpoint 203.0.113.5` for real and
   asserts `wg show wg0`, `nft list ruleset` contains masquerade, `ss -lun` shows 10.66.0.1:53,
   `peer.sh add laptop` prints a valid config.
+
+## v0.2: one-command setup and environment hardening
+
+### Why
+
+Two gaps after v0.1. First, the install needed the user to work on the server by hand
+(ssh, clone, run, copy the peer config back). Second, the tunnel hides *where the Mac
+connects from*, but apps inside the sealed macOS could still learn where it *is*: Location
+Services locate the Mac from nearby Wi-Fi networks (not from its IP), the automatic time
+zone follows that location, the region in the locale names a country, and the DHCP client
+announces the owner's computer name to every network it joins.
+
+### `oneexit init` (client/oneexit, client/lib/init.sh)
+
+One command on the Mac does everything:
+
+```
+sudo oneexit init --server root@203.0.113.5 [--ssh-key PATH] [--port 51820] [--peer NAME]
+                  [--timezone Europe/Berlin] [--region DE] [--no-harden] [--allow-internal-disk] [--dry-run]
+sudo oneexit init                      # interactive: asks for the server address and the options
+sudo oneexit init --config mac.conf    # server already installed by hand: client setup only
+```
+
+Steps, each printed as `Step N/6: ...` with a one-line result:
+
+1. Pre-flight: external disk check (as in setup.sh), Homebrew present, `ssh` present,
+   server address parses as `[user@]host[:sshport]`.
+2. Server reachability: `ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new USER@HOST true`
+   (`-o IdentitiesOnly=yes -i KEY` with `--ssh-key`, `-p SSHPORT` unless 22). ssh runs as
+   `SUDO_USER` (`sudo -u USER -H`, with that user's agent socket from `launchctl asuser`),
+   so the user's keys and `known_hosts` are used, not root's. If the login is not root,
+   `sudo -n true` is checked and every remote command is prefixed with `sudo -n`. On failure
+   print the exact ssh command to try by hand and the usual causes (wrong key, password-only
+   login, passphrase without agent, provider firewall, changed host key, an active kill
+   switch on a re-run). Then, unless `--timezone`, the server's zone:
+   `ssh HOST 'timedatectl show -p Timezone --value'`.
+3. Upload and install the server:
+   `COPYFILE_DISABLE=1 tar --format ustar -C REPO -cf - server | ssh HOST 'rm -rf /opt/oneexit && mkdir -m 0700 /opt/oneexit && tar -C /opt/oneexit --no-same-owner -xf -'`
+   (ustar: no macOS extended attributes; `mkdir` without `-p` fails instead of using a
+   `/opt/oneexit` that another user created), then
+   `ssh HOST 'bash /opt/oneexit/server/install.sh --endpoint HOST_IP --port PORT --peer NAME --timezone TZ'`
+   with the server's output streamed to the terminal (stderr, `PrivateKey` lines hidden) and the peer config captured
+   from `ssh HOST 'cat /etc/wireguard/peers/NAME.conf'` into a temporary file (mode 0600).
+   `HOST_IP` is the address the Mac resolved for HOST (an IP literal is used as is). Re-running
+   `init` against a server that already has oneexit keeps keys and peers (install.sh is
+   idempotent) and adds the peer only if missing.
+4. Client setup: the existing setup.sh steps, as a function call, not a subprocess.
+5. Hardening: `oneexit harden` with the chosen time zone and region, unless `--no-harden`.
+6. Verification: wait up to 30 s for the first handshake, then run the leak test with
+   `--expect-ip HOST_IP` and print the summary and the next steps.
+
+The interactive form asks only: server address, time zone (default: the server's own time
+zone when it is not UTC, otherwise `Europe/Berlin`), region (default: derived from the time
+zone's country when it is unambiguous, otherwise `DE`). Everything else uses defaults.
+`--dry-run` prints the ssh and tar commands it would run and the setup/harden dry runs, with
+no network access: ssh, tar and curl are never called, a hostname is not resolved
+(`192.0.2.1` stands in for it), the server's time zone is assumed to be `Europe/Berlin`,
+and a placeholder peer config with `Endpoint = HOST_IP:PORT` feeds the setup dry run.
+`init` needs root except with `--dry-run` or `--help` and re-runs itself through `sudo`
+after the arguments are checked. Without `--server` and `--config` it is interactive only
+when stdin is a terminal; otherwise it exits 2 with the usage. `init --config FILE` skips
+steps 2 and 3 (and still runs 1, 4, 5 and 6). The CLI finds `server/` next to its own
+`client/` directory (the real path, symlinks followed), else in
+`/usr/local/share/oneexit/<version>`; setup keeps a `/usr/local/bin/oneexit` symlink that
+points at the same CLI instead of copying over it.
+
+The server reports its time zone to clients: `peer.sh` writes `# oneexit-timezone = <tz>`
+as a comment in every peer config (wg-quick ignores `#` lines). `init --config` and
+`setup.sh --config` read it as the default for `--timezone`.
+
+### `oneexit harden` and `oneexit unharden` (client/lib/privacy.sh)
+
+Settings changed, all recorded first in `/usr/local/etc/oneexit/privacy-state` so that
+`unharden` (and `uninstall`) restore the previous values exactly:
+
+| What | How | Why |
+|---|---|---|
+| Location Services off, system-wide | `defaults write /var/db/locationd/Library/Preferences/ByHost/com.apple.locationd LocationServicesEnabled -int 0`, then `launchctl kickstart -k system/com.apple.locationd` | locationd finds the Mac's position from nearby Wi-Fi networks; the tunnel does not hide that |
+| Automatic time zone off | `defaults write /Library/Preferences/com.apple.timezone.auto Active -bool false` | otherwise the time zone follows the real location |
+| Time zone set | `systemsetup -settimezone TZ` (validated against `/usr/share/zoneinfo`) | apps and browsers report the system time zone; it should match the exit country |
+| Region | `AppleLocale` in the global domain for the invoking user: keep the user's language, replace the region (`ru_KZ` → `ru_DE`); `AppleLanguages` entries lose a mismatching region (`ru-KZ` → `ru`) | the locale names a country; the language stays the user's choice |
+| Computer name | `scutil --set ComputerName|HostName|LocalHostName` to a generic `Mac` / `Mac` (LocalHostName `Mac`) | the DHCP client sends the name to every network it joins; it often contains the owner's name |
+| Chrome-family WebRTC | `defaults write com.google.Chrome WebRtcIPHandlingPolicy -string disable_non_proxied_udp` in `/Library/Preferences` (also `com.brave.Browser`, `com.microsoft.Edge`, `org.chromium.Chromium`) | stops WebRTC from offering the LAN address to sites |
+| Firefox WebRTC | `/Applications/Firefox.app/Contents/Resources/distribution/policies.json` with `media.peerconnection.ice.default_address_only=true`, only if Firefox is installed and the file is absent | same |
+| Lookup and Siri suggestions | user defaults `com.apple.lookup.shared LookupSuggestionsDisabled -bool true`, `com.apple.Safari UniversalSearchEnabled -bool false` | these send typed text with location hints to Apple |
+
+Not changed: Apple ID, keyboard layouts, fonts, system language. The docs say why.
+`harden` runs as root but applies user-domain defaults as `SUDO_USER` (`sudo -u USER defaults write ...`).
+`--timezone` and `--region` are stored in `/usr/local/etc/oneexit/config` (`TIMEZONE`, `REGION`).
+
+### Leak test additions (scripts/leak-test.sh)
+
+9. Time zone: `systemsetup -gettimezone` equals `TIMEZONE` from the config (SKIP if unset)
+   and `com.apple.timezone.auto Active` is false.
+10. Location Services: the locationd preference is 0 (FAIL if 1 or missing).
+11. Computer name: none of ComputerName / HostName / LocalHostName contains the invoking
+    user's full name or account name (from `id -F` / `id -un`).
+12. Region: `AppleLocale`'s region equals `REGION` (SKIP if unset).
+
+`--json` includes them. `oneexit status` shows a one-word `privacy: hardened|partial|off` line.
+
+### Server additions
+
+- `install.sh --timezone TZ` (default: the server's current zone from `timedatectl show -p Timezone --value`
+  or `/etc/timezone`, falling back to `Etc/UTC`) is written to `/etc/wireguard/oneexit.env`
+  as `TIMEZONE=`; `peer.sh` emits `# oneexit-timezone = TZ` into peer configs.
+- unbound answers NXDOMAIN for Apple's Wi-Fi positioning endpoint as defence in depth:
+  `local-zone: "gs-loc.apple.com." always_nxdomain` (installer flag `--no-dns-blocklist`
+  skips it). Documented; Maps and Find My use other hosts.
+
+### Root `install.sh` (repository root)
+
+A self-contained bootstrap for the Mac so that the whole product is one line in the README:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/kvozianov/oneexit/main/install.sh)"
+```
+
+It downloads the release tarball for the pinned version (`ONEEXIT_VERSION` inside the
+script; `https://github.com/kvozianov/oneexit/archive/refs/tags/vVERSION.tar.gz`, with
+curl, as the invoking user, into a temporary directory), checks its SHA-256
+(`shasum -a 256` on macOS, `sha256sum` on Linux) against the value embedded in the script
+(`ONEEXIT_SHA256`), unpacks it to `/usr/local/share/oneexit/<version>`, links
+`/usr/local/bin/oneexit` to that copy's `client/oneexit`, and prints
+`sudo oneexit init --server root@YOUR_VPS` as the next step. It never runs `init` itself.
+Without a checksum (an empty `ONEEXIT_SHA256`, or `--version X` other than the pinned one
+without `--sha256 HEX`) it refuses before downloading, unless `--insecure-skip-checksum`.
+Only the writes to `/usr/local` run as root, each through `sudo` (the script usually comes
+from `bash -c`, so there is no file to re-run with sudo). `--version X`, `--sha256 HEX`,
+`--insecure-skip-checksum`, `--dry-run` (no network, no sudo, prints the URL, the checksum
+decision and the paths; works on macOS and Linux) and `--help` are accepted. `scripts/release-checksum.sh VERSION` prints the checksum to paste into the
+script after the tag is pushed; the README keeps the `git clone` path as the audited alternative.
+
+### Tests
+
+- bats (`tests/client/init.bats`, `tests/client/bootstrap.bats`, `tests/client/privacy.bats`):
+  `init` argument parsing and `[user@]host[:port]` splitting; the dry run prints the
+  ssh/tar commands in order and stops before any network call; `--config` path reads the
+  time zone comment; `harden --dry-run` prints every defaults/systemsetup/scutil command and
+  the state file content; region rewriting (`ru_KZ`+`DE` → `ru_DE`, `en-KZ` → `en`); time zone
+  validation rejects `Mars/Olympus`; `unharden --dry-run` restores from a fixture state file;
+  the four new leak-test checks with stubs (`systemsetup`, `defaults`, `scutil`, `id`); root
+  `install.sh --dry-run` on both OSes; server `--timezone` in `oneexit.env` and the peer
+  comment; unbound template contains the local-zone unless `--no-dns-blocklist`.
+- integration.sh: `peer.sh add` output contains `# oneexit-timezone =`; `dig @10.66.0.1 gs-loc.apple.com` → NXDOMAIN.

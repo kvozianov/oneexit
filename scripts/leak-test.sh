@@ -25,6 +25,8 @@ fi
 . "${LIB_DIR}/common.sh"
 # shellcheck source=../client/lib/pf.sh
 . "${LIB_DIR}/pf.sh"
+# shellcheck source=../client/lib/privacy.sh
+. "${LIB_DIR}/privacy.sh"
 
 MAX_HANDSHAKE_AGE=180
 IPV4_SERVICES="${ONEEXIT_IPV4_SERVICES}"
@@ -52,6 +54,13 @@ Checks, each reported as PASS, FAIL, SKIP or INFO:
                  keep the kernel from routing it out of that interface at all)
   7. bonjour     the anchor contains "block all" (mDNS stays local; needs root)
   8. webrtc      what to check by hand in a browser
+  9. timezone    system time zone equals TIMEZONE from the config and the automatic
+                 time zone is off (needs root; SKIP without TIMEZONE)
+ 10. location    Location Services are off (locationd preference is 0; needs root)
+ 11. names       ComputerName, HostName and LocalHostName do not contain your
+                 account name or full name (the DHCP client announces them)
+ 12. region      the region of AppleLocale equals REGION from the config
+                 (SKIP without REGION)
 
 Options:
   --expect-ip IP   expected public IPv4 of the exit, for the ipv4 and dns checks
@@ -63,7 +72,8 @@ Options:
   --help           show this help
 
 Exit codes: 0 no FAIL, 1 at least one FAIL, 2 usage error.
-Without root the pf checks are skipped; the network checks still run.
+Without root the pf, time zone and Location Services checks are skipped; the
+other checks still run.
 USAGE
 }
 
@@ -426,6 +436,145 @@ check_webrtc() {
   record INFO webrtc "open ${WEBRTC_URL} in each browser: only ${EXPECT_IP:-${VPS_IP:-your VPS IP}} may appear; no LAN, ISP or IPv6 addresses"
 }
 
+check_timezone() {
+  local expected now auto
+  if is_dry_run; then
+    show_cmd systemsetup -gettimezone
+    show_cmd defaults read "${PRIVACY_TZAUTO_DOMAIN}" Active
+    record SKIP timezone "dry-run"
+    return 0
+  fi
+  expected="$(privacy_config_value TIMEZONE || true)"
+  if [ -z "${expected}" ]; then
+    record SKIP timezone "no TIMEZONE in ${ONEEXIT_CONFIG} (set it with: sudo oneexit harden --timezone TZ)"
+    return 0
+  fi
+  if ! command -v systemsetup >/dev/null 2>&1; then
+    record SKIP timezone "systemsetup not found"
+    return 0
+  fi
+  if ! is_root; then
+    record SKIP timezone "needs root (run with sudo)"
+    return 0
+  fi
+  now="$(systemsetup -gettimezone 2>/dev/null | sed -n 's/^Time Zone: //p' | head -n 1)" || now=""
+  auto="$(privacy_tz_auto_now)"
+  if [ "${now}" != "${expected}" ]; then
+    record FAIL timezone "system time zone is ${now:-unknown}, not ${expected}: apps see a different country than the exit"
+  elif [ "${auto}" != "0" ]; then
+    record FAIL timezone "time zone is ${expected}, but the automatic time zone is on and follows the real location"
+  else
+    record PASS timezone "time zone ${expected}, automatic time zone off"
+  fi
+}
+
+check_location() {
+  local value
+  if is_dry_run; then
+    show_cmd defaults read "${PRIVACY_LOCATIOND_DOMAIN}" LocationServicesEnabled
+    record SKIP location "dry-run"
+    return 0
+  fi
+  if ! command -v defaults >/dev/null 2>&1; then
+    record SKIP location "defaults not found"
+    return 0
+  fi
+  if ! is_root; then
+    record SKIP location "needs root (run with sudo)"
+    return 0
+  fi
+  value="$(privacy_location_now)"
+  case "${value}" in
+    0) record PASS location "Location Services are off" ;;
+    '') record FAIL location "Location Services preference is missing: macOS may locate this Mac from nearby Wi-Fi networks" ;;
+    *) record FAIL location "Location Services are on: macOS locates this Mac from nearby Wi-Fi networks, tunnel or not" ;;
+  esac
+}
+
+# name_reveals NAME TOKEN...: print the first TOKEN that NAME contains
+# (case-insensitive for ASCII).
+name_reveals() {
+  local name token lname ltoken
+  name="$1"
+  shift
+  lname="$(printf '%s' "${name}" | tr '[:upper:]' '[:lower:]')"
+  for token in "$@"; do
+    [ "${#token}" -ge 3 ] || continue
+    ltoken="$(printf '%s' "${token}" | tr '[:upper:]' '[:lower:]')"
+    case "${lname}" in
+      *"${ltoken}"*)
+        printf '%s\n' "${token}"
+        return 0
+        ;;
+      *) ;;
+    esac
+  done
+  return 1
+}
+
+check_names() {
+  local user full key name hit word
+  local -a tokens=()
+  if is_dry_run; then
+    for key in ${PRIVACY_NAME_KEYS}; do
+      show_cmd scutil --get "${key}"
+    done
+    show_cmd id -un
+    show_cmd id -F "<user>"
+    record SKIP names "dry-run"
+    return 0
+  fi
+  if ! command -v scutil >/dev/null 2>&1; then
+    record SKIP names "scutil not found"
+    return 0
+  fi
+  user="$(privacy_user)"
+  full="$(privacy_full_name "${user}")"
+  tokens+=("${user}")
+  if [ -n "${full}" ]; then
+    tokens+=("${full}")
+    for word in ${full}; do
+      tokens+=("${word}")
+    done
+  fi
+  for key in ${PRIVACY_NAME_KEYS}; do
+    name="$(privacy_name_now "${key}")"
+    [ -n "${name}" ] || continue
+    if hit="$(name_reveals "${name}" "${tokens[@]}")"; then
+      record FAIL names "${key} \"${name}\" contains \"${hit}\"; the DHCP client announces it to every network (sudo oneexit harden)"
+      return 0
+    fi
+  done
+  record PASS names "ComputerName, HostName and LocalHostName do not contain ${user}${full:+ or ${full}}"
+}
+
+check_region() {
+  local expected locale user
+  if is_dry_run; then
+    show_cmd defaults read -g AppleLocale
+    record SKIP region "dry-run"
+    return 0
+  fi
+  expected="$(privacy_config_value REGION || true)"
+  if [ -z "${expected}" ]; then
+    record SKIP region "no REGION in ${ONEEXIT_CONFIG} (set it with: sudo oneexit harden --region RR)"
+    return 0
+  fi
+  if ! command -v defaults >/dev/null 2>&1; then
+    record SKIP region "defaults not found"
+    return 0
+  fi
+  user="$(privacy_user)"
+  locale="$(privacy_locale_now "${user}")"
+  if [ -z "${locale}" ]; then
+    record FAIL region "AppleLocale of ${user} is not set (expected a locale ending in _${expected})"
+  elif [ "$(locale_region "${locale}")" = "${expected}" ]; then
+    record PASS region "AppleLocale ${locale} names ${expected}"
+  else
+    record FAIL region "AppleLocale ${locale} names $(locale_region "${locale}" || true), not ${expected}"
+  fi
+}
+
 check_pf
 check_handshake
 check_ipv4
@@ -434,6 +583,10 @@ check_dns
 check_direct
 check_bonjour
 check_webrtc
+check_timezone
+check_location
+check_names
+check_region
 
 if [ "${JSON}" -eq 1 ]; then
   print_json

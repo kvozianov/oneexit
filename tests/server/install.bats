@@ -86,3 +86,67 @@ setup() {
   run "${INSTALL_SH}" --dry-run --endpoint 203.0.113.5
   [[ "${output}" == *"$(printf '[dry-run] write %s/etc/nftables.conf (mode 0755):\n#!/usr/sbin/nft -f\nflush ruleset\nok: removed the old oneexit include line' "${ONEEXIT_ROOT}")"* ]]
 }
+
+@test "install.sh --timezone is validated, written to oneexit.env, the peer config and the summary" {
+  run "${INSTALL_SH}" --dry-run --endpoint 203.0.113.5 --timezone Europe/Berlin
+  [ "${status}" -eq 0 ]
+  expected="$(printf '[dry-run] write %s/etc/wireguard/oneexit.env (mode 0600):\nENDPOINT=203.0.113.5\nPORT=51820\nTIMEZONE=Europe/Berlin' "${ONEEXIT_ROOT}")"
+  [[ "${output}" == *"${expected}"* ]]
+  [[ "${output}" == *"$(printf '(mode 0600):\n# oneexit-timezone = Europe/Berlin\n[Interface]')"* ]]
+  [[ "${output}" == *"Time zone     Europe/Berlin"* ]]
+  # Validation against the tz database (a fixture directory here).
+  export ONEEXIT_ZONEINFO="${BATS_TEST_TMPDIR}/zoneinfo"
+  mkdir -p "${ONEEXIT_ZONEINFO}/Europe"
+  : >"${ONEEXIT_ZONEINFO}/Europe/Berlin"
+  run "${INSTALL_SH}" --dry-run --endpoint 203.0.113.5 --timezone Europe/Berlin
+  [ "${status}" -eq 0 ]
+  run "${INSTALL_SH}" --dry-run --endpoint 203.0.113.5 --timezone Mars/Olympus
+  [ "${status}" -eq 2 ]
+  [[ "${output}" == *"invalid --timezone: Mars/Olympus"* ]]
+  run "${INSTALL_SH}" --dry-run --endpoint 203.0.113.5 --timezone ../../etc/passwd
+  [ "${status}" -eq 2 ]
+  # Without a tz database only the form of the name is checked.
+  export ONEEXIT_ZONEINFO="${BATS_TEST_TMPDIR}/missing"
+  run "${INSTALL_SH}" --dry-run --endpoint 203.0.113.5 --timezone 'Europe/Ber lin'
+  [ "${status}" -eq 2 ]
+}
+
+@test "install.sh detects the server time zone: timedatectl, then /etc/timezone, then Etc/UTC" {
+  stubs="${BATS_TEST_TMPDIR}/bin"
+  mkdir -p "${stubs}"
+  printf '#!/bin/sh\n[ "$*" = "show -p Timezone --value" ] && echo Asia/Tokyo\n' >"${stubs}/timedatectl"
+  chmod +x "${stubs}/timedatectl"
+  PATH="${stubs}:${PATH}" run "${INSTALL_SH}" --dry-run --endpoint 203.0.113.5
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"TIMEZONE=Asia/Tokyo"* ]]
+  [[ "${output}" == *"# oneexit-timezone = Asia/Tokyo"* ]]
+  # timedatectl fails: /etc/timezone is used.
+  printf '#!/bin/sh\nexit 1\n' >"${stubs}/timedatectl"
+  mkdir -p "${ONEEXIT_ROOT}/etc"
+  printf 'America/New_York\n' >"${ONEEXIT_ROOT}/etc/timezone"
+  PATH="${stubs}:${PATH}" run "${INSTALL_SH}" --dry-run --endpoint 203.0.113.5
+  [[ "${output}" == *"TIMEZONE=America/New_York"* ]]
+  # Neither: Etc/UTC.
+  rm "${ONEEXIT_ROOT}/etc/timezone"
+  PATH="${stubs}:${PATH}" run "${INSTALL_SH}" --dry-run --endpoint 203.0.113.5
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"TIMEZONE=Etc/UTC"* ]]
+  # A re-run keeps the time zone recorded in oneexit.env; --timezone replaces it.
+  install_wg_fixture wg0-two-peers.conf
+  printf 'TIMEZONE=Europe/Paris\n' >>"${ONEEXIT_ROOT}/etc/wireguard/oneexit.env"
+  PATH="${stubs}:${PATH}" run "${INSTALL_SH}" --dry-run
+  [[ "${output}" == *"$(printf 'ENDPOINT=vpn.example.org\nPORT=443\nTIMEZONE=Europe/Paris')"* ]]
+  PATH="${stubs}:${PATH}" run "${INSTALL_SH}" --dry-run --timezone Europe/Berlin
+  [[ "${output}" == *"time zone changed from Europe/Paris to Europe/Berlin"* ]]
+  [[ "${output}" == *"$(printf 'PORT=443\nTIMEZONE=Europe/Berlin')"* ]]
+}
+
+@test "install.sh blocks gs-loc.apple.com in unbound unless --no-dns-blocklist" {
+  run "${INSTALL_SH}" --dry-run --endpoint 203.0.113.5
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *'local-zone: "gs-loc.apple.com." always_nxdomain'* ]]
+  run "${INSTALL_SH}" --dry-run --endpoint 203.0.113.5 --no-dns-blocklist
+  [ "${status}" -eq 0 ]
+  [[ "${output}" != *"local-zone:"* ]]
+  [[ "${output}" == *"no blocklist"* ]]
+}
