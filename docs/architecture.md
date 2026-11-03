@@ -337,7 +337,7 @@ Settings changed, all recorded first in `/usr/local/etc/oneexit/privacy-state` s
 |---|---|---|
 | Location Services off, system-wide | `defaults write /var/db/locationd/Library/Preferences/ByHost/com.apple.locationd LocationServicesEnabled -int 0`, then `launchctl kickstart -k system/com.apple.locationd` | locationd finds the Mac's position from nearby Wi-Fi networks; the tunnel does not hide that |
 | Automatic time zone off | `defaults write /Library/Preferences/com.apple.timezone.auto Active -bool false` | otherwise the time zone follows the real location |
-| Time zone set | `systemsetup -settimezone TZ` (validated against `/usr/share/zoneinfo`) | apps and browsers report the system time zone; it should match the exit country |
+| Time zone set | `systemsetup -settimezone TZ` (validated against `/usr/share/zoneinfo`); for a zone that systemsetup does not list (`UTC`), `ln -sfn /var/db/timezone/zoneinfo/TZ /etc/localtime` and `notifyutil -p com.apple.system.timezone`. The recorded zone is the one `/etc/localtime` points to, because `systemsetup -gettimezone` reports `UTC` as `GMT` | apps and browsers report the system time zone; it should match the exit country |
 | Region | `AppleLocale` in the global domain for the invoking user: keep the user's language, replace the region (`ru_KZ` → `ru_DE`); `AppleLanguages` entries lose a mismatching region (`ru-KZ` → `ru`) | the locale names a country; the language stays the user's choice |
 | Computer name | `scutil --set ComputerName|HostName|LocalHostName` to a generic `Mac` / `Mac` (LocalHostName `Mac`) | the DHCP client sends the name to every network it joins; it often contains the owner's name |
 | Chrome-family WebRTC | `defaults write com.google.Chrome WebRtcIPHandlingPolicy -string disable_non_proxied_udp` in `/Library/Preferences` (also `com.brave.Browser`, `com.microsoft.Edge`, `org.chromium.Chromium`) | stops WebRTC from offering the LAN address to sites |
@@ -350,7 +350,7 @@ Not changed: Apple ID, keyboard layouts, fonts, system language. The docs say wh
 
 ### Leak test additions (scripts/leak-test.sh)
 
-9. Time zone: `systemsetup -gettimezone` equals `TIMEZONE` from the config (SKIP if unset)
+9. Time zone: the zone `/etc/localtime` points to (`systemsetup -gettimezone` if it names none) equals `TIMEZONE` from the config (SKIP if unset)
    and `com.apple.timezone.auto Active` is false.
 10. Location Services: the locationd preference is 0 (FAIL if 1 or missing).
 11. Computer name: none of ComputerName / HostName / LocalHostName contains the invoking

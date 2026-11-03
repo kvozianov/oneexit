@@ -144,6 +144,7 @@ setup() {
   [ "$(FAKE_UID=0 FAKE_COMPUTER_NAME="Test User's MacBook Pro" privacy_status)" = "partial" ]
   # Safari is not part of the summary (its settings may be unreadable).
   [ "$(FAKE_UID=0 FAKE_SAFARI=1 privacy_status)" = "hardened" ]
+  ln -sf /var/db/timezone/zoneinfo/Asia/Almaty "${ONEEXIT_LOCALTIME}"
   [ "$(FAKE_UID=0 FAKE_LOCATION=1 FAKE_TZ_AUTO=1 FAKE_TIMEZONE=Asia/Almaty FAKE_APPLE_LOCALE=ru_KZ \
     FAKE_APPLE_LANGUAGES=ru-KZ FAKE_WEBRTC='' FAKE_LOOKUP='' FAKE_COMPUTER_NAME=x FAKE_HOST_NAME='' \
     FAKE_LOCAL_HOST_NAME=x privacy_status)" = "off" ]
@@ -292,6 +293,60 @@ setup() {
   [ ! -e "${policy}" ]
 }
 
+@test "the time zone is read from the /etc/localtime link, not from systemsetup's name for it" {
+  load_client_libs
+  # macOS 15 (real run on a GitHub runner): the UTC zone, and systemsetup -gettimezone says GMT.
+  ln -sf /var/db/timezone/zoneinfo/UTC "${ONEEXIT_LOCALTIME}"
+  [ "$(FAKE_UID=0 FAKE_TIMEZONE=GMT privacy_timezone_now)" = "UTC" ]
+  [ "$(FAKE_TIMEZONE=GMT privacy_timezone_now)" = "UTC" ]
+  # Without a usable link, systemsetup (root only) is the fallback.
+  rm -f "${ONEEXIT_LOCALTIME}"
+  [ "$(FAKE_UID=0 FAKE_TIMEZONE=GMT privacy_timezone_now)" = "GMT" ]
+  [ -z "$(FAKE_TIMEZONE=GMT privacy_timezone_now)" ]
+}
+
+@test "a Mac set to UTC: harden records UTC, unharden links /etc/localtime back because systemsetup refuses UTC" {
+  run bash -c '. "$1/lib/common.sh"; for t in defaults scutil systemsetup launchctl notifyutil id; do command -v "$t"; done' _ "${CLIENT_DIR}"
+  for tool in defaults scutil systemsetup launchctl notifyutil id; do
+    printf '%s\n' "${output}" | grep -qxF "${FIXTURES}/bin/${tool}" || skip "${tool} does not resolve to the stub"
+  done
+  write_privacy_config
+  export FAKE_CALL_LOG="${BATS_TEST_TMPDIR}/calls"
+  ln -sf /var/db/timezone/zoneinfo/UTC "${ONEEXIT_LOCALTIME}"
+  FAKE_UID=0 FAKE_TIMEZONE=GMT run "${CLIENT_DIR}/oneexit" harden
+  [ "${status}" -eq 0 ]
+  grep -qxF "TIMEZONE=UTC" "${ONEEXIT_PRIVACY_STATE}"
+  grep -qxF "systemsetup -settimezone Europe/Berlin" "${FAKE_CALL_LOG}"
+  # The stub changes nothing: do what systemsetup would have done.
+  ln -sf /var/db/timezone/zoneinfo/Europe/Berlin "${ONEEXIT_LOCALTIME}"
+  : >"${FAKE_CALL_LOG}"
+  FAKE_UID=0 FAKE_TIMEZONE=Europe/Berlin run "${CLIENT_DIR}/oneexit" unharden
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"systemsetup does not know UTC; linking ${ONEEXIT_LOCALTIME} to /var/db/timezone/zoneinfo/UTC"* ]]
+  [ "$(readlink "${ONEEXIT_LOCALTIME}")" = "/var/db/timezone/zoneinfo/UTC" ]
+  grep -qxF "systemsetup -settimezone UTC" "${FAKE_CALL_LOG}"
+  grep -qxF "notifyutil -p com.apple.system.timezone" "${FAKE_CALL_LOG}"
+  [ ! -e "${ONEEXIT_PRIVACY_STATE}" ]
+  # harden --timezone UTC takes the same way.
+  ln -sf /var/db/timezone/zoneinfo/Europe/Berlin "${ONEEXIT_LOCALTIME}"
+  FAKE_UID=0 run "${CLIENT_DIR}/oneexit" harden --timezone UTC --region DE
+  [ "${status}" -eq 0 ]
+  [ "$(readlink "${ONEEXIT_LOCALTIME}")" = "/var/db/timezone/zoneinfo/UTC" ]
+}
+
+@test "unharden keeps the state file when the recorded zone can be set neither way" {
+  run bash -c '. "$1/lib/common.sh"; for t in defaults scutil systemsetup launchctl notifyutil id; do command -v "$t"; done' _ "${CLIENT_DIR}"
+  for tool in defaults scutil systemsetup launchctl notifyutil id; do
+    printf '%s\n' "${output}" | grep -qxF "${FIXTURES}/bin/${tool}" || skip "${tool} does not resolve to the stub"
+  done
+  sed 's|^TIMEZONE=.*|TIMEZONE=Etc/UTC|' "${FIXTURES}/privacy-state" >"${ONEEXIT_PRIVACY_STATE}"
+  FAKE_UID=0 run "${CLIENT_DIR}/oneexit" unharden
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"could not restore the time zone"* ]]
+  [ -e "${ONEEXIT_PRIVACY_STATE}" ]
+  [ "$(readlink "${ONEEXIT_LOCALTIME}")" = "/var/db/timezone/zoneinfo/Asia/Almaty" ]
+}
+
 @test "harden and unharden have --help without root and reject unknown options" {
   run "${CLIENT_DIR}/oneexit" harden --help
   [ "${status}" -eq 0 ]
@@ -359,6 +414,7 @@ setup() {
   cp "${FIXTURES}/privacy-state" "${ONEEXIT_PRIVACY_STATE}"
   FAKE_UID=0 run "${CLIENT_DIR}/oneexit" status
   [[ "${output}" == *"privacy:      hardened"* ]]
+  ln -sf /var/db/timezone/zoneinfo/Asia/Almaty "${ONEEXIT_LOCALTIME}"
   FAKE_UID=0 FAKE_TIMEZONE=Asia/Almaty run "${CLIENT_DIR}/oneexit" status
   [[ "${output}" == *"privacy:      partial"* ]]
 }
@@ -469,6 +525,7 @@ setup() {
 @test "leak-test 9-12 FAIL on the values they guard against" {
   write_privacy_config
   fake_hardened
+  ln -sf /var/db/timezone/zoneinfo/Asia/Almaty "${ONEEXIT_LOCALTIME}"
   FAKE_UID=0 FAKE_TIMEZONE=Asia/Almaty FAKE_LOCATION=1 FAKE_COMPUTER_NAME="Test User's MacBook Pro" \
     FAKE_APPLE_LOCALE=ru_KZ run "${REPO_ROOT}/scripts/leak-test.sh"
   [ "${status}" -eq 1 ]
@@ -476,6 +533,7 @@ setup() {
   printf '%s\n' "${output}" | grep -q '^FAIL  location   Location Services are on'
   printf '%s\n' "${output}" | grep -q '^FAIL  names      ComputerName "Test User.s MacBook Pro" contains "Test User"'
   printf '%s\n' "${output}" | grep -q '^FAIL  region     AppleLocale ru_KZ names KZ, not DE$'
+  ln -sf /var/db/timezone/zoneinfo/Europe/Berlin "${ONEEXIT_LOCALTIME}"
   FAKE_UID=0 FAKE_TZ_AUTO=1 FAKE_LOCATION='' FAKE_LOCAL_HOST_NAME=testers-mac run "${REPO_ROOT}/scripts/leak-test.sh"
   printf '%s\n' "${output}" | grep -q '^FAIL  timezone   .*automatic time zone is on'
   printf '%s\n' "${output}" | grep -q '^FAIL  location   Location Services preference is missing'

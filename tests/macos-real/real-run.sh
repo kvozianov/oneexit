@@ -34,7 +34,7 @@ CHROME_BUNDLES="com.google.Chrome com.brave.Browser com.microsoft.Edge org.chrom
 FIREFOX_APP="/Applications/Firefox.app"
 FIREFOX_POLICY="${FIREFOX_APP}/Contents/Resources/distribution/policies.json"
 # Keys of a snapshot that unharden has to bring back exactly.
-RESTORE_KEYS="TIMEZONE LOCALTIME TZ_AUTO LOCATION LOCATION_CURRENTHOST LOCATION_NOTBACKEDUP LOCATION_API
+RESTORE_KEYS="TIMEZONE LOCALTIME DATE_ZONE TZ_AUTO LOCATION LOCATION_CURRENTHOST LOCATION_NOTBACKEDUP LOCATION_API
 COMPUTER_NAME HOST_NAME LOCAL_HOST_NAME APPLE_LOCALE APPLE_LANGUAGES
 WEBRTC_com.google.Chrome WEBRTC_com.brave.Browser WEBRTC_com.microsoft.Edge WEBRTC_org.chromium.Chromium
 FIREFOX_POLICY LOOKUP_SUGGESTIONS_DISABLED SAFARI_UNIVERSAL_SEARCH"
@@ -126,6 +126,7 @@ snapshot() {
   {
     printf 'TIMEZONE=%s\n' "$(timezone_now)"
     printf 'LOCALTIME=%s\n' "$(readlink /etc/localtime 2>/dev/null | or_absent)"
+    printf 'DATE_ZONE=%s\n' "$(date +%Z)"
     printf 'TZ_AUTO=%s\n' "$(root_default "${TZAUTO_DOMAIN}" Active)"
     printf 'LOCATION=%s\n' "$(root_default "${LOCATIOND_DOMAIN}" LocationServicesEnabled)"
     # The ByHost domain the way CFPreferences resolves it for the locationd

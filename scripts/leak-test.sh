@@ -439,6 +439,7 @@ check_webrtc() {
 check_timezone() {
   local expected now auto
   if is_dry_run; then
+    show_cmd readlink "${ONEEXIT_LOCALTIME}"
     show_cmd systemsetup -gettimezone
     show_cmd defaults read "${PRIVACY_TZAUTO_DOMAIN}" Active
     record SKIP timezone "dry-run"
@@ -457,7 +458,9 @@ check_timezone() {
     record SKIP timezone "needs root (run with sudo)"
     return 0
   fi
-  now="$(systemsetup -gettimezone 2>/dev/null | sed -n 's/^Time Zone: //p' | head -n 1)" || now=""
+  # The /etc/localtime link, as harden and unharden see it (systemsetup
+  # reports UTC as GMT); systemsetup only when the link names no zone.
+  now="$(privacy_timezone_now)"
   auto="$(privacy_tz_auto_now)"
   if [ "${now}" != "${expected}" ]; then
     record FAIL timezone "system time zone is ${now:-unknown}, not ${expected}: apps see a different country than the exit"

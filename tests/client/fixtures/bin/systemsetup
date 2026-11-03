@@ -1,10 +1,23 @@
 #!/usr/bin/env bash
 # Test stub for systemsetup: never changes the clock or the time zone.
 #   -gettimezone      prints FAKE_TIMEZONE (default Asia/Almaty)
-#   -settimezone TZ   prints what macOS prints; changes nothing
+#   -settimezone TZ   prints what macOS prints; changes nothing. Like macOS 15,
+#                     it refuses names that -listtimezones lacks (UTC, Etc/UTC).
+# Every -settimezone call is recorded in FAKE_CALL_LOG, if set.
 case "${1:-}" in
   -gettimezone) echo "Time Zone: ${FAKE_TIMEZONE:-Asia/Almaty}" ;;
-  -settimezone) echo "Set TimeZone: ${2:-}" ;;
+  -settimezone)
+    if [ -n "${FAKE_CALL_LOG:-}" ]; then
+      printf 'systemsetup %s\n' "$*" >>"${FAKE_CALL_LOG}"
+    fi
+    case "${2:-}" in
+      UTC | Etc/UTC)
+        echo "${2} is not a valid timezone. The command 'listtimezones' will show a list of valid time zones."
+        exit 1
+        ;;
+      *) echo "Set TimeZone: ${2:-}" ;;
+    esac
+    ;;
   *) ;;
 esac
 exit 0

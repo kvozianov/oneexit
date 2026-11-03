@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Test stub for notifyutil: posts nothing; records the call in FAKE_CALL_LOG.
+if [ -n "${FAKE_CALL_LOG:-}" ]; then
+  printf 'notifyutil %s\n' "$*" >>"${FAKE_CALL_LOG}"
+fi
+exit 0

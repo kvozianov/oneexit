@@ -13,6 +13,8 @@ ONEEXIT_PRIVACY_STATE="${ONEEXIT_PRIVACY_STATE:-${ONEEXIT_ETC_DIR}/privacy-state
 ONEEXIT_ZONEINFO="${ONEEXIT_ZONEINFO:-/usr/share/zoneinfo}"
 ONEEXIT_APPLICATIONS_DIR="${ONEEXIT_APPLICATIONS_DIR:-/Applications}"
 ONEEXIT_LOCALTIME="${ONEEXIT_LOCALTIME:-/etc/localtime}"
+# Where /etc/localtime points (systemsetup links it into this directory).
+ONEEXIT_TZ_LINK_DIR="${ONEEXIT_TZ_LINK_DIR:-/var/db/timezone/zoneinfo}"
 
 PRIVACY_DEFAULT_TIMEZONE="Europe/Berlin"
 PRIVACY_DEFAULT_REGION="DE"
@@ -271,19 +273,19 @@ privacy_user_defaults_read() {
   fi
 }
 
-# privacy_timezone_now: the system time zone. systemsetup needs root; the
-# /etc/localtime link answers the same without it.
+# privacy_timezone_now: the system time zone, from the /etc/localtime link
+# (the zone libc uses). systemsetup -gettimezone is only the fallback: it
+# needs root and reports some zones under another name (UTC as "GMT"), and
+# restoring that name would switch the Mac to a different zone.
 privacy_timezone_now() {
   local tz="" link
-  if is_root && command -v systemsetup >/dev/null 2>&1; then
+  link="$(readlink "${ONEEXIT_LOCALTIME}" 2>/dev/null || true)"
+  case "${link}" in
+    *zoneinfo/*) tz="${link##*zoneinfo/}" ;;
+    *) ;;
+  esac
+  if [ -z "${tz}" ] && is_root && command -v systemsetup >/dev/null 2>&1; then
     tz="$(systemsetup -gettimezone 2>/dev/null | sed -n 's/^Time Zone: //p' | head -n 1)" || tz=""
-  fi
-  if [ -z "${tz}" ]; then
-    link="$(readlink "${ONEEXIT_LOCALTIME}" 2>/dev/null || true)"
-    case "${link}" in
-      *zoneinfo/*) tz="${link##*zoneinfo/}" ;;
-      *) ;;
-    esac
   fi
   printf '%s\n' "${tz}"
 }
@@ -526,6 +528,27 @@ _privacy_soft_user() {
   return 0
 }
 
+# privacy_set_timezone WHAT TZ: set the system time zone with systemsetup.
+# systemsetup only knows the names of its -listtimezones (GMT, but not UTC:
+# "UTC is not a valid timezone"); for a zone it refuses that exists in the
+# zone database, link /etc/localtime the way systemsetup does and tell
+# running processes (libc re-reads the zone on this notification).
+privacy_set_timezone() {
+  local what="$1" tz="$2"
+  if run systemsetup -settimezone "${tz}"; then
+    return 0
+  fi
+  if ! tz_is_valid "${tz}"; then
+    log_warn "could not ${what}"
+    PRIVACY_FAILED=$((PRIVACY_FAILED + 1))
+    return 0
+  fi
+  log_info "    systemsetup does not know ${tz}; linking ${ONEEXIT_LOCALTIME} to ${ONEEXIT_TZ_LINK_DIR}/${tz}"
+  privacy_try "${what}" ln -sfn "${ONEEXIT_TZ_LINK_DIR}/${tz}" "${ONEEXIT_LOCALTIME}"
+  run notifyutil -p com.apple.system.timezone >/dev/null 2>&1 || true
+  return 0
+}
+
 # privacy_config_set TZ REGION: store TIMEZONE and REGION in the config
 # (for "oneexit harden" without arguments and for the leak test).
 privacy_config_set() {
@@ -570,7 +593,7 @@ harden_apply() {
   log_step "Setting the time zone to ${tz} (automatic time zone off)"
   privacy_try "turn the automatic time zone off" \
     defaults write "${PRIVACY_TZAUTO_DOMAIN}" Active -bool false
-  privacy_try "set the time zone" systemsetup -settimezone "${tz}"
+  privacy_set_timezone "set the time zone" "${tz}"
 
   log_step "Setting the region to ${region} for ${user} (the language stays)"
   locale="$(privacy_locale_now "${user}")"
@@ -686,7 +709,7 @@ unharden_apply() {
   _restore_default "" "${PRIVACY_TZAUTO_DOMAIN}" Active bool "$(privacy_state_read TZ_AUTO || true)"
   v="$(privacy_state_read TIMEZONE || true)"
   if [ -n "${v}" ]; then
-    privacy_try "restore the time zone" systemsetup -settimezone "${v}"
+    privacy_set_timezone "restore the time zone" "${v}"
   else
     log_warn "no time zone recorded; leaving the current one"
   fi
