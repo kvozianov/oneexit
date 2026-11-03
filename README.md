@@ -23,11 +23,12 @@ sudo oneexit init --server root@YOUR_VPS
 > independent security review. Read the [threat model](docs/threat-model.md) before
 > you rely on it.
 >
-> **Status.** [v0.1.1](https://github.com/kvozianov/oneexit/releases/tag/v0.1.1) is a
-> pre-release. The server side is exercised by a real install in CI; the macOS client has
-> been run end to end in a macOS virtual machine against that server (install, traffic
-> through the tunnel, leak checks, kill switch recovery, portal and unlock windows, reboot,
-> uninstall), but not yet on a physical Mac booted from an external SSD.
+> **Status.** [v0.2.0](https://github.com/kvozianov/oneexit/releases/tag/v0.2.0) is a
+> pre-release. The server side is exercised by a real install in CI; the v0.1 client
+> (firewall, tunnel, portal and unlock windows, reboot, uninstall) has been run end to end
+> in a macOS virtual machine against that server. The v0.2 additions, `oneexit init` and
+> `oneexit harden`, are covered by unit tests and CI dry runs so far; nothing has yet been
+> run on a physical Mac booted from an external SSD.
 
 ## Who this is for
 

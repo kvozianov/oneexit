@@ -8,9 +8,9 @@ runs themselves, not estimates.
 | Job | Runner | What it proves |
 |---|---|---|
 | shellcheck 0.11 + `bash -n` | ubuntu | every script parses and is lint-clean |
-| bats | ubuntu and macos | 92 unit tests: config rendering, pf rule text, parsers, dry runs of every installer with stubbed system tools |
-| macOS dry run + pf syntax | macos | `client/setup.sh --dry-run`, `pfctl -nvf` on the locked, portal and unlocked rulesets, `plutil -lint` on the launchd plists, CLI smoke |
-| server install | ubuntu | `server/install.sh` runs for real as root; `tests/server/integration.sh` then asserts `wg show`, the nftables tables, unbound on `10.66.0.1:53`, the systemd units, peer add / list / revoke and an idempotent second run (40 checks) |
+| bats | ubuntu and macos | 171 unit tests: config rendering, pf rule text, parsers, dry runs of every installer with stubbed system tools |
+| macOS dry run + pf syntax | macos | `client/setup.sh --dry-run`, `oneexit init --dry-run`, `pfctl -nvf` on the locked, portal and unlocked rulesets, `plutil -lint` on the launchd plists, CLI smoke |
+| server install | ubuntu | `server/install.sh` runs for real as root; `tests/server/integration.sh` then asserts `wg show`, the nftables tables, unbound on `10.66.0.1:53`, the systemd units, peer add / list / revoke and an idempotent second run (43 checks) |
 
 ## End-to-end run in a macOS virtual machine (2026-10-30)
 
@@ -46,6 +46,11 @@ needed a checksum fix on the container's `wg0` (`tc ... action csum`) because th
 container runtime delivers packets with offloaded checksums.
 
 ## Not yet verified
+
+- `oneexit init` against a real ssh server and `oneexit harden` on a running system
+  (v0.2.0): both have unit tests with stubbed `ssh`, `defaults`, `systemsetup` and
+  `scutil`, and `init --dry-run` runs in CI on macOS, but neither has been run for real
+  in the virtual machine yet.
 
 - A physical Mac booted from an external SSD (Apple silicon or Intel): boot timing on real
   hardware, Wi-Fi association, sleep and wake, a real captive portal.
