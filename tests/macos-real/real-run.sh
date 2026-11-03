@@ -34,7 +34,7 @@ CHROME_BUNDLES="com.google.Chrome com.brave.Browser com.microsoft.Edge org.chrom
 FIREFOX_APP="/Applications/Firefox.app"
 FIREFOX_POLICY="${FIREFOX_APP}/Contents/Resources/distribution/policies.json"
 # Keys of a snapshot that unharden has to bring back exactly.
-RESTORE_KEYS="TIMEZONE LOCALTIME TZ_AUTO LOCATION LOCATION_CURRENTHOST LOCATION_API
+RESTORE_KEYS="TIMEZONE LOCALTIME TZ_AUTO LOCATION LOCATION_CURRENTHOST LOCATION_NOTBACKEDUP LOCATION_API
 COMPUTER_NAME HOST_NAME LOCAL_HOST_NAME APPLE_LOCALE APPLE_LANGUAGES
 WEBRTC_com.google.Chrome WEBRTC_com.brave.Browser WEBRTC_com.microsoft.Edge WEBRTC_org.chromium.Chromium
 FIREFOX_POLICY LOOKUP_SUGGESTIONS_DISABLED SAFARI_UNIVERSAL_SEARCH"
@@ -131,6 +131,7 @@ snapshot() {
     # The ByHost domain the way CFPreferences resolves it for the locationd
     # user (the file with the hardware UUID in its name).
     printf 'LOCATION_CURRENTHOST=%s\n' "$(sudo -u _locationd -H defaults -currentHost read com.apple.locationd LocationServicesEnabled 2>/dev/null | head -n 1 | or_absent)"
+    printf 'LOCATION_NOTBACKEDUP=%s\n' "$(sudo -u _locationd -H defaults -currentHost read com.apple.locationd.notbackedup LocationServicesEnabled 2>/dev/null | head -n 1 | or_absent)"
     printf 'LOCATION_API=%s\n' "$(location_api)"
     printf 'COMPUTER_NAME=%s\n' "$(name_of ComputerName)"
     printf 'HOST_NAME=%s\n' "$(name_of HostName)"
@@ -174,12 +175,51 @@ value() {
   sed -n "s/^$2=//p" "${OUT}/$1.env" | head -n 1
 }
 
+# locationd_log LABEL: the last 2 minutes of locationd's log (the kickstart
+# was a few seconds ago) in OUT/locationd-LABEL.log; prints the
+# locationServicesEnabledStatus that the running locationd logged when it
+# started (1 on, 0 off), or "unknown".
 locationd_log() {
-  local label="$1"
-  # The kickstart happened a few seconds ago; 2 minutes covers it.
+  local label="$1" pid status
+  pid="$(pgrep -x locationd | head -n 1 || true)"
   sudo log show --last 2m --style compact --predicate 'process == "locationd"' >"${OUT}/locationd-${label}.log" 2>&1 || true
-  echo "--- locationd log (${label}): $(wc -l <"${OUT}/locationd-${label}.log" | tr -d ' ') lines; lines about the enabled state:"
-  grep -i -E 'LocationServicesEnabled|servicesEnabled|enabled|disabled|kill|exit|start' "${OUT}/locationd-${label}.log" | head -n 25 || true
+  status="$(grep -F "locationd[${pid}:" "${OUT}/locationd-${label}.log" |
+    sed -n 's/.*"locationServicesEnabledStatus":\([0-9-]*\).*/\1/p' | tail -n 1)"
+  {
+    echo "--- locationd log (${label}): $(wc -l <"${OUT}/locationd-${label}.log" | tr -d ' ') lines, pid ${pid:-none}; state lines:"
+    grep -F "locationd[${pid}:" "${OUT}/locationd-${label}.log" |
+      grep -E 'locationServicesEnabledStatus|disabled system-wide|Location services are' | head -n 5 || true
+  } >&2
+  printf '%s\n' "${status:-unknown}"
+}
+
+# enable_location: the runner image ships with Location Services off, which
+# would make harden's switch invisible. Scaffolding: turn them on the way the
+# preference is stored for the locationd user (its ByHost domain, plus the
+# "notbackedup" copy that macOS 15 keeps next to it), restart locationd, and
+# check that CoreLocation reports them on. Written with -currentHost as
+# _locationd, not with the path privacy.sh uses, so the two cross-check.
+enable_location() {
+  local api status
+  sudo -u _locationd -H defaults -currentHost write com.apple.locationd LocationServicesEnabled -int 1
+  sudo launchctl kickstart -k system/com.apple.locationd
+  sleep 5
+  api="$(location_api)"
+  status="$(locationd_log enable-1)"
+  record baseline "enable Location Services (ByHost only)" INFO "CoreLocation ${api}, locationd status ${status}" "true / 1"
+  if [ "${api}" != "true" ]; then
+    sudo -u _locationd -H defaults -currentHost write com.apple.locationd.notbackedup LocationServicesEnabled -int 1
+    sudo launchctl kickstart -k system/com.apple.locationd
+    sleep 5
+    api="$(location_api)"
+    status="$(locationd_log enable-2)"
+    record baseline "enable Location Services (+ notbackedup)" INFO "CoreLocation ${api}, locationd status ${status}" "true / 1"
+  fi
+  if [ "${api}" = "true" ]; then
+    record baseline "Location Services on before harden" PASS "${api}" "true"
+  else
+    record baseline "Location Services on before harden" FAIL "${api}" "true (scaffolding could not turn them on)"
+  fi
 }
 
 # run_cli LOG ARGS...: sudo client/oneexit ARGS, output to OUT/LOG and the job
@@ -282,7 +322,10 @@ CONF
   cat "${CONFIG}"
   echo "--- runner: macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion)), $(uname -m), user $(id -un) ($(id -F 2>/dev/null || true))"
   echo "--- csrutil status: $(csrutil status 2>&1 || true)"
+  record baseline "time zones systemsetup lists" INFO "$(sudo systemsetup -listtimezones 2>/dev/null | tr -d ' ' | grep -E -x 'UTC|GMT|Etc/UTC|Etc/GMT' | paste -s -d ' ' - || true)" "-"
+  enable_location
   snapshot baseline
+  locationd_log baseline >"${OUT}/locationd-status-baseline.txt"
   if [ "$(value baseline PRIVACY_STATE)" = "<absent>" ]; then
     record baseline "no privacy-state before harden" PASS "<absent>" "<absent>"
   else
@@ -305,7 +348,8 @@ assert_hardened() {
   expect_eq "${p}" "/etc/localtime" "$(value "${l}" LOCALTIME)" "/var/db/timezone/zoneinfo/${TZ_WANT}"
   expect_eq "${p}" "automatic time zone" "$(value "${l}" TZ_AUTO)" "0"
   expect_eq "${p}" "Location Services (privacy.sh path)" "$(value "${l}" LOCATION)" "0"
-  record "${p}" "Location Services (-currentHost)" INFO "$(value "${l}" LOCATION_CURRENTHOST)" "what CFPreferences sees for _locationd"
+  expect_eq "${p}" "Location Services (-currentHost)" "$(value "${l}" LOCATION_CURRENTHOST)" "0"
+  record "${p}" "Location Services (notbackedup)" INFO "$(value "${l}" LOCATION_NOTBACKEDUP)" "-"
   case "$(value "${l}" LOCATION_API)" in
     false) record "${p}" "Location Services (CoreLocation)" PASS "false" "false" ;;
     true) record "${p}" "Location Services (CoreLocation)" FAIL "true" "false" ;;
@@ -376,7 +420,7 @@ phase_harden() {
   fi
   sleep 3
   snapshot hardened
-  locationd_log hardened
+  expect_eq harden "locationd logged at start" "$(locationd_log hardened)" "0"
   record harden "locationd pid" INFO "$(value baseline LOCATIOND_PID) -> $(value hardened LOCATIOND_PID)" "a new pid after kickstart -k"
   assert_hardened harden hardened
   mo="$(sudo stat -f '%Lp %Su' "${STATE}" 2>/dev/null || echo "?")"
@@ -427,7 +471,7 @@ phase_unharden() {
   expect_eq unharden "unharden exit code" "${rc}" 0
   sleep 3
   snapshot restored
-  locationd_log restored
+  expect_eq unharden "locationd logged at start" "$(locationd_log restored)" "$(cat "${OUT}/locationd-status-baseline.txt")"
   assert_restored unharden restored
   rc="$(run_cli status-restored.log status)"
   expect_eq unharden "status exit code" "${rc}" 0
@@ -476,8 +520,19 @@ phase_idempotence() {
   phase_end
 }
 
+# probe_timezone_names: after everything else, what systemsetup does with the
+# UTC and GMT names (it reports the UTC zone as GMT).
+probe_timezone_names() {
+  local tz out
+  for tz in UTC GMT; do
+    out="$(sudo systemsetup -settimezone "${tz}" 2>&1 | grep -v 'Error:-99' | tr '\n' ' ')"
+    record probe "systemsetup -settimezone ${tz}" INFO "${out}-> link $(readlink /etc/localtime), get: $(timezone_now), date +%Z: $(date +%Z)" "-"
+  done
+}
+
 phase_summary() {
   local key md="${OUT}/summary.md" total pass fail info
+  probe_timezone_names
   # Remove the scaffolding config (and the directory if nothing else is left).
   sudo rm -f "${CONFIG}"
   sudo rmdir "${ETC_DIR}" 2>/dev/null || true

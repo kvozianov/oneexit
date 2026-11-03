@@ -6,6 +6,14 @@ name: macOS real run
 # that is discarded afterwards and never fine on anyone's own Mac.
 # The steps are in tests/macos-real/real-run.sh, which refuses to run outside
 # a GitHub-hosted macOS runner.
+#
+# Runner-specific, not product behaviour: the macOS 15 runner image has System
+# Integrity Protection disabled (csrutil status in the first step) and ships
+# with Location Services off. With SIP on, "launchctl kickstart -k
+# system/com.apple.locationd" may be refused (harden then warns that the change
+# takes effect after a restart) and writing into /Applications/Firefox.app
+# may need the App Management permission. The baseline step turns Location
+# Services on first, so that harden has something to turn off.
 on:
   workflow_dispatch:
 
