@@ -1,0 +1,76 @@
+name: macOS real run
+
+# Runs the bootstrap one-liner and "oneexit harden" / "oneexit unharden" for
+# real on a throwaway GitHub-hosted Mac (passwordless sudo, no tunnel, no
+# server). Manual only: it changes system settings, which is fine on a runner
+# that is discarded afterwards and never fine on anyone's own Mac.
+# The steps are in tests/macos-real/real-run.sh, which refuses to run outside
+# a GitHub-hosted macOS runner.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-run:
+    name: bootstrap + harden/unharden (real, macOS 15)
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      # Outputs go to $RUNNER_TEMP/macos-real (the runner context is not
+      # available at job level).
+      ONEEXIT_REAL_RUN: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Runner
+        run: |
+          sw_vers
+          uname -a
+          id
+          csrutil status || true
+
+      # The README one-liner against the checked-out install.sh: downloads the
+      # pinned release tarball, checks its SHA-256, unpacks it to
+      # /usr/local/share/oneexit/<version> and links /usr/local/bin/oneexit.
+      - name: 1. Bootstrap (install.sh one-liner)
+        id: bootstrap
+        run: bash tests/macos-real/real-run.sh bootstrap
+
+      # From here on the checked-out client/oneexit is used, so the run tests
+      # this commit rather than the release. The baseline step also writes the
+      # config file that setup.sh would have written (placeholder server
+      # values), so that harden stores TIMEZONE/REGION and leak checks 9 and 12
+      # run instead of SKIPping.
+      - name: 2. Baseline
+        id: baseline
+        if: always()
+        run: bash tests/macos-real/real-run.sh baseline
+
+      - name: 3-4. Harden and check
+        id: harden
+        if: always() && steps.baseline.outcome == 'success'
+        run: bash tests/macos-real/real-run.sh harden
+
+      - name: 5. Unharden and check the baseline is back
+        id: unharden
+        if: always() && steps.baseline.outcome == 'success'
+        run: bash tests/macos-real/real-run.sh unharden
+
+      - name: 6. Idempotence (harden twice, then unharden)
+        id: idempotence
+        if: always() && steps.baseline.outcome == 'success'
+        run: bash tests/macos-real/real-run.sh idempotence
+
+      - name: 7. Summary
+        if: always()
+        run: bash tests/macos-real/real-run.sh summary
+
+      - name: Upload values, logs and leak-test JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-real-run
+          path: ${{ runner.temp }}/macos-real
+          if-no-files-found: warn
