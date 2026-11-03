@@ -419,6 +419,11 @@ In CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)):
   is up, the nftables ruleset contains the masquerade rule, unbound listens on
   `10.66.0.1:53`, and `peer.sh add` prints a valid client config.
 
+A manual workflow, [.github/workflows/macos-real.yml](.github/workflows/macos-real.yml), runs the
+bootstrap one-liner and `oneexit harden` / `unharden` for real on a throwaway GitHub macOS
+runner and checks every changed value before, after and once restored (no tunnel there, so
+leak checks 1-8 are not part of it).
+
 Beyond CI, the client has been run end to end in a macOS virtual machine against a server
 installed by `server/install.sh`: install, traffic through the tunnel with matching
 counters on both ends, leak checks, kill switch and watchdog recovery, portal and unlock
