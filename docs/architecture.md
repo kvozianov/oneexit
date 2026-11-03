@@ -298,7 +298,7 @@ Steps, each printed as `Step N/6: ...` with a one-line result:
    `COPYFILE_DISABLE=1 tar --format ustar -C REPO -cf - server | ssh HOST 'rm -rf /opt/oneexit && mkdir -m 0700 /opt/oneexit && tar -C /opt/oneexit --no-same-owner -xf -'`
    (ustar: no macOS extended attributes; `mkdir` without `-p` fails instead of using a
    `/opt/oneexit` that another user created), then
-   `ssh HOST 'bash /opt/oneexit/server/install.sh --endpoint HOST_IP --port PORT --peer NAME --timezone TZ'`
+   `ssh HOST 'bash /opt/oneexit/server/install.sh --endpoint HOST_IP --port PORT --peer NAME --timezone TZ --quiet-peer'`
    with the server's output streamed to the terminal (stderr, `PrivateKey` lines hidden) and the peer config captured
    from `ssh HOST 'cat /etc/wireguard/peers/NAME.conf'` into a temporary file (mode 0600).
    `HOST_IP` is the address the Mac resolved for HOST (an IP literal is used as is). Re-running

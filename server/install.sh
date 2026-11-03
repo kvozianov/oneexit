@@ -13,7 +13,7 @@ source "${SCRIPT_DIR}/lib/templates.sh"
 usage() {
   cat <<'USAGE'
 Usage: install.sh [--port N] [--endpoint HOST_OR_IP] [--peer NAME]
-                  [--timezone TZ] [--no-dns-blocklist] [--dry-run]
+                  [--timezone TZ] [--no-dns-blocklist] [--quiet-peer] [--dry-run]
 
 Turn a fresh Debian 12+ / Ubuntu 22.04+ VPS into the single exit of a oneexit
 Mac: WireGuard on wg0 (10.66.0.1/24), NAT to the internet, and a recursive
@@ -29,6 +29,10 @@ Options:
                           else Etc/UTC); the Mac adopts it
   --no-dns-blocklist      do not answer NXDOMAIN for Apple's Wi-Fi positioning
                           endpoint (gs-loc.apple.com)
+  --quiet-peer            for an automated install (oneexit init): do not print
+                          the first peer's config or QR code (it holds the
+                          private key), only where it was saved, and no manual
+                          copy/setup steps; the caller fetches the file itself
   --dry-run               print every command and file instead of changing anything
   -h, --help              show this help
 
@@ -50,6 +54,7 @@ ENDPOINT=""
 PEER="mac"
 TIMEZONE=""
 DNS_BLOCKLIST="yes"
+QUIET_PEER=0
 
 WG_DIR="$(root_path /etc/wireguard)"
 WG_CONF="${WG_DIR}/wg0.conf"
@@ -109,6 +114,7 @@ parse_args() {
         ;;
       --timezone=*) TIMEZONE="${1#*=}" ;;
       --no-dns-blocklist) DNS_BLOCKLIST="no" ;;
+      --quiet-peer) QUIET_PEER=1 ;;
       --dns-only-tunnel) ;; # implied: DNS always goes to 10.66.0.1 through the tunnel
       --dry-run) DRY_RUN=1 ;;
       -h | --help)
@@ -345,12 +351,20 @@ start_services() {
   ok "wg-quick@wg0, unbound and ${NFT_UNIT} enabled"
 }
 
+# The first peer's config and QR code go to stdout, for an install by hand.
+# With --quiet-peer neither is printed (peer.sh add --quiet), only where the
+# config was saved: the caller (oneexit init) fetches it over ssh.
 first_peer() {
   local conf="${PEERS_DIR}/${PEER}.conf"
-  local -a dry=()
+  local -a opts=()
   step "First peer: ${PEER}"
-  is_dry_run && dry=(--dry-run)
+  is_dry_run && opts+=(--dry-run)
+  ((QUIET_PEER)) && opts+=(--quiet)
   if [[ -e "${conf}" ]]; then
+    if ((QUIET_PEER)); then
+      ok "peer ${PEER} already exists; keeping ${conf}"
+      return 0
+    fi
     ok "peer ${PEER} already exists; keeping it"
     if [[ -r "${conf}" ]]; then
       cat "${conf}"
@@ -360,7 +374,11 @@ first_peer() {
     return 0
   else
     "${SCRIPT_DIR}/peer.sh" add "${PEER}" --endpoint "${ENDPOINT}" --port "${PORT}" \
-      --timezone "${TIMEZONE}" ${dry[@]+"${dry[@]}"}
+      --timezone "${TIMEZONE}" ${opts[@]+"${opts[@]}"}
+    if ((QUIET_PEER)); then
+      ok "peer ${PEER} written to ${conf}"
+      return 0
+    fi
   fi
   printf '\n'
   run qrencode -t ansiutf8 -r "${conf}"
@@ -401,13 +419,24 @@ summary() {
   Time zone     ${TIMEZONE} (written into every peer config; the Mac adopts it)
   First peer    ${PEERS_DIR}/${PEER}.conf
 
+SUMMARY
+  if ((QUIET_PEER)); then
+    cat >&2 <<NEXT
+Next steps:
+  1. Allow UDP ${PORT} in your VPS provider's firewall, if it has one.
+  2. The peer config stays in ${PEERS_DIR}/${PEER}.conf; oneexit init fetches it over ssh.
+  3. More devices: ${SCRIPT_DIR}/peer.sh add NAME   (list | qr NAME | revoke NAME)
+NEXT
+  else
+    cat >&2 <<NEXT
 Next steps:
   1. Allow UDP ${PORT} in your VPS provider's firewall, if it has one.
   2. Copy the peer config to the Mac, e.g.:
        scp root@${ENDPOINT}:${PEERS_DIR}/${PEER}.conf ./${PEER}.conf
      and run: client/setup.sh --config ${PEER}.conf
   3. More devices: ${SCRIPT_DIR}/peer.sh add NAME   (list | qr NAME | revoke NAME)
-SUMMARY
+NEXT
+  fi
   if is_dry_run; then
     printf '\ndry-run: nothing was changed.\n' >&2
   fi

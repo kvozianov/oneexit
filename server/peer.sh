@@ -31,6 +31,8 @@ Options:
   --timezone TZ           time zone written as "# oneexit-timezone = TZ" at the
                           top of client configs (default: TIMEZONE from
                           /etc/wireguard/oneexit.env; no line when unset)
+  --quiet                 add: do not print the client config to stdout (it is
+                          still saved to /etc/wireguard/peers/NAME.conf)
   --dry-run               print commands and file contents, change nothing
   -h, --help              show this help
 
@@ -53,6 +55,7 @@ STATE_FILE="${WG_DIR}/oneexit.env"
 OPT_ENDPOINT=""
 OPT_PORT=""
 OPT_TIMEZONE=""
+OPT_QUIET=0
 
 # Serialise concurrent add/revoke runs (Linux, real mode only).
 take_lock() {
@@ -163,7 +166,7 @@ cmd_add() {
   printf '%s\n' "${config}" | write_file "${PEERS_DIR}/${name}.conf" 0600
   printf '%s\n' "${pub}" | write_file "${PEERS_DIR}/${name}.pub" 0644
   ok "peer ${name}: ${ip}, endpoint ${ENDPOINT}:${PORT}; config saved to ${PEERS_DIR}/${name}.conf"
-  printf '%s\n' "${config}"
+  ((OPT_QUIET)) || printf '%s\n' "${config}"
 }
 
 cmd_revoke() {
@@ -220,6 +223,7 @@ main() {
   while (($# > 0)); do
     case "$1" in
       --dry-run) DRY_RUN=1 ;;
+      --quiet) OPT_QUIET=1 ;;
       --endpoint)
         (($# >= 2)) || usage_error "--endpoint needs a value"
         OPT_ENDPOINT="$2"

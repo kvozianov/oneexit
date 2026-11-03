@@ -106,3 +106,14 @@ CONF
   [[ "${output}" != *"oneexit-timezone"* ]]
   [ "$(last_lines "${output}" 10 | head -n 1)" = "[Interface]" ]
 }
+
+@test "peer.sh add --quiet saves the client config without printing it" {
+  run --separate-stderr "${PEER_SH}" add laptop --dry-run --quiet
+  [ "${status}" -eq 0 ]
+  # stdout holds only the dry-run lines; the config shows once, inside the write.
+  [ "$(printf '%s\n' "${output}" | grep -c '^\[Interface\]$')" -eq 1 ]
+  [ "$(last_lines "${output}" 2)" = "$(printf '[dry-run] write %s/etc/wireguard/peers/laptop.pub (mode 0644):\nDRYRUN_PUBLIC_KEY_1' "${ONEEXIT_ROOT}")" ]
+  [[ "${stderr}" == *"config saved to ${ONEEXIT_ROOT}/etc/wireguard/peers/laptop.conf"* ]]
+  run "${PEER_SH}" --help
+  [[ "${output}" == *"--quiet"* ]]
+}

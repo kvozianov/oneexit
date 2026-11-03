@@ -8,7 +8,7 @@ runs themselves, not estimates.
 | Job | Runner | What it proves |
 |---|---|---|
 | shellcheck 0.11 + `bash -n` | ubuntu | every script parses and is lint-clean |
-| bats | ubuntu and macos | 171 unit tests: config rendering, pf rule text, parsers, dry runs of every installer with stubbed system tools |
+| bats | ubuntu and macos | 175 unit tests: config rendering, pf rule text, parsers, dry runs of every installer with stubbed system tools |
 | macOS dry run + pf syntax | macos | `client/setup.sh --dry-run`, `oneexit init --dry-run`, `pfctl -nvf` on the locked, portal and unlocked rulesets, `plutil -lint` on the launchd plists, CLI smoke |
 | server install | ubuntu | `server/install.sh` runs for real as root; `tests/server/integration.sh` then asserts `wg show`, the nftables tables, unbound on `10.66.0.1:53`, the systemd units, peer add / list / revoke and an idempotent second run (43 checks) |
 
@@ -45,12 +45,34 @@ unbound could not recurse and the DNS resolver check fails there; TCP through th
 needed a checksum fix on the container's `wg0` (`tc ... action csum`) because the
 container runtime delivers packets with offloaded checksums.
 
+## `oneexit init`, server half, against a container (2026-11-03)
+
+Setup: the same kind of privileged Ubuntu 24.04 container with systemd as above, with sshd
+on a forwarded port, a root login and a non-root login `ops` with passwordless sudo, key
+logins only, time zone `Europe/Amsterdam`. Steps 1-3 of `oneexit init` (pre-flight, ssh
+reachability, upload, remote `server/install.sh`, peer config fetch) were run for real from
+a Mac through a harness that sources the client libraries and calls the step functions;
+steps 4-6 (client setup, hardening, leak test) were not run because they change the Mac
+they run on.
+
+| Check | Result |
+|---|---|
+| `--server root@HOST:2222 --ssh-key KEY` | pass: login, server time zone read (`Europe/Amsterdam`, region `NL` derived), `server/` uploaded with ustar tar, `install.sh --endpoint HOST --port 51820 --peer mac --timezone Europe/Amsterdam` ran and installed WireGuard, unbound and nftables, peer config fetched into a mode-0600 temporary file with `# oneexit-timezone = Europe/Amsterdam` and `Endpoint = HOST:51820`; 41 s in all |
+| `--server ops@HOST:2222` (non-root) | pass: `sudo -n` checked, every remote command prefixed with `sudo -n`, same result |
+| Second run (idempotence) | pass: the server key, `wg0.conf` and the peer list were byte-identical before and after; `install.sh` reported "keeping the existing server key" and "peer mac already exists" |
+| Server after the run | `wg-quick@wg0`, `unbound` and `oneexit-nft` active; `wg show wg0` listening on 51820 with the peer's allowed IP; one masquerade rule; `peer.sh list` shows the peer |
+| Private keys in the output | the streamed installer output hides `PrivateKey` lines; the first peer's QR code was still printed by `install.sh` (fixed after this run: `init` now asks the installer for a quiet first peer) |
+
+Lab-only: the container's outbound UDP was blocked by the container runtime during this
+run, so the installer's DNS self-check warned (as designed, warning only) and unbound's
+recursion could not be re-checked; it was checked on 2026-10-30.
+
 ## Not yet verified
 
-- `oneexit init` against a real ssh server and `oneexit harden` on a running system
-  (v0.2.0): both have unit tests with stubbed `ssh`, `defaults`, `systemsetup` and
-  `scutil`, and `init --dry-run` runs in CI on macOS, but neither has been run for real
-  in the virtual machine yet.
+- `oneexit init` steps 4-6 and `oneexit harden` on a running macOS (v0.2.0): both have
+  unit tests with stubbed `ssh`, `defaults`, `systemsetup` and `scutil`, and
+  `init --dry-run` runs in CI on macOS, but the client half of `init` and the hardening
+  have not been run for real in the virtual machine yet.
 
 - A physical Mac booted from an external SSD (Apple silicon or Intel): boot timing on real
   hardware, Wi-Fi association, sleep and wake, a real captive portal.

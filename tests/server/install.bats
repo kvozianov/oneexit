@@ -150,3 +150,47 @@ setup() {
   [[ "${output}" != *"local-zone:"* ]]
   [[ "${output}" == *"no blocklist"* ]]
 }
+
+@test "install.sh prints the first peer's config, QR code and manual next steps by default" {
+  run "${INSTALL_SH}" --dry-run --endpoint 203.0.113.5 --peer ci
+  [ "${status}" -eq 0 ]
+  # Once in the dry-run write of peers/ci.conf, once printed by peer.sh add.
+  [ "$(printf '%s\n' "${output}" | grep -c '^Endpoint = 203.0.113.5:51820$')" -eq 2 ]
+  [[ "${output}" == *"[dry-run] qrencode -t ansiutf8 -r ${ONEEXIT_ROOT}/etc/wireguard/peers/ci.conf"* ]]
+  [[ "${output}" == *"scp root@203.0.113.5:${ONEEXIT_ROOT}/etc/wireguard/peers/ci.conf ./ci.conf"* ]]
+  [[ "${output}" == *"and run: client/setup.sh --config ci.conf"* ]]
+  [[ "${output}" != *"written to"* ]]
+}
+
+@test "install.sh --quiet-peer prints only where the first peer was saved, no QR or scp steps" {
+  run "${INSTALL_SH}" --help
+  [[ "${output}" == *"--quiet-peer"* ]]
+  run "${INSTALL_SH}" --dry-run --endpoint 203.0.113.5 --peer ci --quiet-peer
+  [ "${status}" -eq 0 ]
+  # Only the dry-run write of peers/ci.conf shows the config; peer.sh add gets --quiet.
+  [ "$(printf '%s\n' "${output}" | grep -c '^Endpoint = 203.0.113.5:51820$')" -eq 1 ]
+  [[ "${output}" == *"[dry-run] write ${ONEEXIT_ROOT}/etc/wireguard/peers/ci.conf (mode 0600):"* ]]
+  [[ "${output}" == *"ok: peer ci written to ${ONEEXIT_ROOT}/etc/wireguard/peers/ci.conf"* ]]
+  [[ "${output}" != *"qrencode -t"* ]]
+  [[ "${output}" != *"scp "* ]]
+  [[ "${output}" != *"client/setup.sh"* ]]
+  [[ "${output}" == *"The peer config stays in ${ONEEXIT_ROOT}/etc/wireguard/peers/ci.conf; oneexit init fetches it over ssh."* ]]
+  [[ "${output}" == *"Allow UDP 51820 in your VPS provider's firewall"* ]]
+  [[ "${output}" == *"dry-run: nothing was changed."* ]]
+}
+
+@test "install.sh --quiet-peer does not print an existing first peer's config" {
+  install_wg_fixture wg0-two-peers.conf
+  printf 'SERVER_PRIV_FIXTURE\n' >"${ONEEXIT_ROOT}/etc/wireguard/server.key"
+  printf '[Interface]\nPrivateKey = EXISTING_PEER_KEY\n' >"${ONEEXIT_ROOT}/etc/wireguard/peers/mac.conf"
+  run "${INSTALL_SH}" --dry-run
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"PrivateKey = EXISTING_PEER_KEY"* ]]
+  [[ "${output}" == *"qrencode -t ansiutf8"* ]]
+  run "${INSTALL_SH}" --dry-run --quiet-peer
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"ok: peer mac already exists; keeping ${ONEEXIT_ROOT}/etc/wireguard/peers/mac.conf"* ]]
+  [[ "${output}" != *"EXISTING_PEER_KEY"* ]]
+  [[ "${output}" != *"qrencode -t"* ]]
+  [[ "${output}" != *"scp "* ]]
+}

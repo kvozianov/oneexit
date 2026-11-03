@@ -258,9 +258,11 @@ init_upload_local() {
 }
 
 # init_install_remote: server/install.sh with the endpoint the Mac resolved.
+# --quiet-peer: no peer config or QR code in the streamed output (init_cat_remote
+# fetches the config) and no manual scp/setup steps.
 init_install_remote() {
   _remote bash "${INIT_REMOTE_DIR}/server/install.sh" --endpoint "${HOST_IP}" \
-    --port "${INIT_WG_PORT}" --peer "${INIT_PEER}" --timezone "${TIMEZONE}"
+    --port "${INIT_WG_PORT}" --peer "${INIT_PEER}" --timezone "${TIMEZONE}" --quiet-peer
 }
 
 init_cat_remote() {

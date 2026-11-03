@@ -122,7 +122,7 @@ line_of() {
   [[ "${output}" == *"[dry-run] ${ssh} true"* ]]
   [[ "${output}" == *"[dry-run] ${ssh} 'timedatectl show -p Timezone --value'"* ]]
   [[ "${output}" == *"[dry-run] COPYFILE_DISABLE=1 tar --format ustar -C ${REPO_ROOT} -cf - server | ${ssh} 'rm -rf /opt/oneexit && mkdir -m 0700 /opt/oneexit && tar -C /opt/oneexit --no-same-owner -xf -'"* ]]
-  [[ "${output}" == *"[dry-run] ${ssh} 'bash /opt/oneexit/server/install.sh --endpoint 203.0.113.5 --port 51820 --peer mac --timezone Europe/Berlin' >&2"* ]]
+  [[ "${output}" == *"[dry-run] ${ssh} 'bash /opt/oneexit/server/install.sh --endpoint 203.0.113.5 --port 51820 --peer mac --timezone Europe/Berlin --quiet-peer' >&2"* ]]
   [[ "${output}" == *"[dry-run] ${ssh} 'cat /etc/wireguard/peers/mac.conf'"* ]]
   [ "$(line_of "${ssh} true")" -lt "$(line_of "| ${ssh} 'rm -rf")" ]
   [ "$(line_of "| ${ssh} 'rm -rf")" -lt "$(line_of "server/install.sh --endpoint")" ]
@@ -179,7 +179,7 @@ line_of() {
   [[ "${output}" == *"[dry-run] ${ssh} 'sudo -n true'"* ]]
   [[ "${output}" == *"[dry-run] ${ssh} 'sudo -n timedatectl show -p Timezone --value'"* ]]
   [[ "${output}" == *"${ssh} 'sudo -n rm -rf /opt/oneexit && sudo -n mkdir -m 0700 /opt/oneexit && sudo -n tar -C /opt/oneexit --no-same-owner -xf -'"* ]]
-  [[ "${output}" == *"[dry-run] ${ssh} 'sudo -n bash /opt/oneexit/server/install.sh --endpoint 203.0.113.5 --port 51820 --peer mac --timezone Europe/Berlin' >&2"* ]]
+  [[ "${output}" == *"[dry-run] ${ssh} 'sudo -n bash /opt/oneexit/server/install.sh --endpoint 203.0.113.5 --port 51820 --peer mac --timezone Europe/Berlin --quiet-peer' >&2"* ]]
   [[ "${output}" == *"[dry-run] ${ssh} 'sudo -n cat /etc/wireguard/peers/mac.conf'"* ]]
 }
 
@@ -193,7 +193,7 @@ line_of() {
 @test "init --dry-run passes --port, --peer, --timezone and --region through" {
   init_dry --server root@203.0.113.5 --port 443 --peer laptop --timezone Europe/Amsterdam
   [ "${status}" -eq 0 ]
-  [[ "${output}" == *"'bash /opt/oneexit/server/install.sh --endpoint 203.0.113.5 --port 443 --peer laptop --timezone Europe/Amsterdam'"* ]]
+  [[ "${output}" == *"'bash /opt/oneexit/server/install.sh --endpoint 203.0.113.5 --port 443 --peer laptop --timezone Europe/Amsterdam --quiet-peer'"* ]]
   [[ "${output}" == *"'cat /etc/wireguard/peers/laptop.conf'"* ]]
   [[ "${output}" != *"timedatectl"* ]]
   cfg="$(dry_run_block "${output}" "${ONEEXIT_CONFIG}")"

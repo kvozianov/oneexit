@@ -12,8 +12,8 @@ set -euo pipefail
 # Filled in by the release step (scripts/release-checksum.sh VERSION prints
 # the checksum of the GitHub tag tarball): the version this script installs
 # and the SHA-256 of https://github.com/kvozianov/oneexit/archive/refs/tags/v<version>.tar.gz
-ONEEXIT_VERSION="0.2.0"
-ONEEXIT_SHA256="901842a6dbe09b84a81e4c9f78f611d2d81778c2785f55cb2b0d9a61cdb866b1"
+ONEEXIT_VERSION="0.2.1"
+ONEEXIT_SHA256=""
 
 REPO_URL="https://github.com/kvozianov/oneexit"
 SHARE_DIR="/usr/local/share/oneexit"
